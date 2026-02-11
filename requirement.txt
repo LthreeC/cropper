@@ -1,0 +1,5 @@
+Pillow>=9.0.0
+numpy>=1.20.0
+pymupdf>=1.21.0
+
+pywin32>=305; sys_platform == "win32"
