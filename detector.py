@@ -4,16 +4,6 @@
 提供三种检测模式：smart(智能), simple(简单), edge(边缘敏感)
 """
 
-import numpy as np
-from PIL import Image
-
-# scipy 可选
-try:
-    from scipy import ndimage
-    HAS_SCIPY = True
-except ImportError:
-    HAS_SCIPY = False
-
 
 class WhiteBorderDetector:
     """白边检测器"""
@@ -28,6 +18,9 @@ class WhiteBorderDetector:
     
     def detect(self, pil_img):
         """检测内容边界框"""
+        import numpy as np
+        from PIL import Image
+        
         # 大图缩放检测
         scale = 1.0
         max_size = 1200
@@ -69,6 +62,8 @@ class WhiteBorderDetector:
     
     def _preprocess(self, pil_img):
         """预处理：统一转 RGB"""
+        from PIL import Image
+        
         if pil_img.mode == 'RGB':
             return pil_img
         
@@ -89,6 +84,8 @@ class WhiteBorderDetector:
     
     def _detect_edge(self, img_array):
         """边缘敏感模式"""
+        import numpy as np
+        
         gray = img_array.mean(axis=2).astype(np.int16)
         
         # 梯度检测 (使用切片避免创建新数组)
@@ -108,13 +105,18 @@ class WhiteBorderDetector:
         content_mask = gray < self.threshold
         combined = edge_mask | content_mask
         
-        if HAS_SCIPY:
+        try:
+            from scipy import ndimage
             combined = ndimage.binary_dilation(combined, iterations=1)
+        except ImportError:
+            pass
         
         return combined
     
     def _detect_smart(self, img_array):
         """智能模式：综合检测"""
+        import numpy as np
+        
         # 一次性计算灰度
         gray = img_array.mean(axis=2).astype(np.int16)
         
@@ -150,13 +152,18 @@ class WhiteBorderDetector:
         combined = brightness_mask | color_mask | edge_mask
         
         # 形态学处理
-        if HAS_SCIPY:
+        try:
+            from scipy import ndimage
             combined = ndimage.binary_dilation(combined, iterations=1)
+        except ImportError:
+            pass
         
         return combined
     
     def _get_bbox_from_mask(self, mask):
         """从 mask 获取边界框"""
+        import numpy as np
+        
         rows = np.any(mask, axis=1)
         cols = np.any(mask, axis=0)
         

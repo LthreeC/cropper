@@ -10,21 +10,19 @@ import subprocess
 
 CURRENT_OS = platform.system()
 
-try:
-    import fitz
-    HAS_FITZ = True
-except ImportError:
-    fitz = None
-    HAS_FITZ = False
 
-if CURRENT_OS == "Windows":
+def _lazy_import_pymupdf():
+    """懒加载 pymupdf"""
     try:
-        import win32com.client
-        HAS_WIN32COM = True
+        import pymupdf
+        return pymupdf
     except ImportError:
-        HAS_WIN32COM = False
-else:
-    HAS_WIN32COM = False
+        return None
+
+
+def has_pymupdf():
+    """检查 pymupdf 是否可用"""
+    return _lazy_import_pymupdf() is not None
 
 
 class BaseController:
@@ -50,7 +48,9 @@ class WindowsPPTController(BaseController):
         self.app = None
     
     def _connect(self):
-        if not HAS_WIN32COM:
+        try:
+            import win32com.client
+        except ImportError:
             return False
         try:
             self.app = win32com.client.GetActiveObject("PowerPoint.Application")
@@ -186,7 +186,7 @@ class FileController(BaseController):
     
     def __init__(self):
         self.file_paths = []
-        self.file_type = None  # "pdf" or "image"
+        self.file_type = None
     
     def check_connection(self):
         return True
@@ -212,12 +212,13 @@ class FileController(BaseController):
     
     def get_pdf_page_count(self, path=None):
         """获取 PDF 页数"""
-        if not HAS_FITZ:
+        pymupdf = _lazy_import_pymupdf()
+        if not pymupdf:
             return 0
         path = path or (self.file_paths[0] if self.file_paths else None)
         if not path:
             return 0
-        doc = fitz.open(path)
+        doc = pymupdf.open(path)
         count = len(doc)
         doc.close()
         return count
@@ -225,10 +226,11 @@ class FileController(BaseController):
     def render_pdf_page(self, path, page_index, dpi=300):
         """渲染 PDF 页面"""
         from PIL import Image
-        doc = fitz.open(path)
+        pymupdf = _lazy_import_pymupdf()
+        doc = pymupdf.open(path)
         page = doc[page_index]
         zoom = dpi / 72.0
-        pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom), alpha=False)
+        pix = page.get_pixmap(matrix=pymupdf.Matrix(zoom, zoom), alpha=False)
         img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
         doc.close()
         return img

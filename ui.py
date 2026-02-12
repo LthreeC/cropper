@@ -10,12 +10,7 @@ import subprocess
 import tkinter as tk
 from tkinter import ttk, filedialog
 
-from controllers import FileController, HAS_FITZ, CURRENT_OS
-
-try:
-    import fitz
-except ImportError:
-    fitz = None
+CURRENT_OS = platform.system()
 
 
 class CropperApp(ttk.Frame):
@@ -76,15 +71,10 @@ class CropperApp(ttk.Frame):
     
     def _create_ui(self):
         """创建界面"""
-        # 依赖检查
-        if not HAS_FITZ:
-            warn = ttk.Label(self, text="提示: 安装 pymupdf 可支持 PDF 处理 (pip install pymupdf)", 
-                           foreground="orange", font=self.font_base)
-            warn.pack(pady=(10, 0), padx=20, anchor="w")
-        
         # 主内容区
         main = ttk.Frame(self, padding=20)
         main.pack(fill="both", expand=True)
+        self._main_frame = main
         
         # 1. 来源
         self._create_source_section(main)
@@ -103,6 +93,9 @@ class CropperApp(ttk.Frame):
         
         # 6. 日志
         self._create_log_section(main)
+        
+        # 延迟检查 pymupdf 可用性（不阻塞窗口显示）
+        self.after(0, self._deferred_pymupdf_check)
     
     def _create_source_section(self, parent):
         """来源选择"""
@@ -292,6 +285,16 @@ class CropperApp(ttk.Frame):
         self.log_text.tag_configure("WARNING", foreground="#f39c12")
         self.log_text.tag_configure("ERROR", foreground="#dc3545")
     
+    # ========== 延迟检查 ==========
+    
+    def _deferred_pymupdf_check(self):
+        """延迟检查 pymupdf 是否可用"""
+        from controllers import has_pymupdf
+        if not has_pymupdf():
+            warn = ttk.Label(self, text="提示: 安装 pymupdf 可支持 PDF 处理 (pip install pymupdf)", 
+                           foreground="orange", font=self.font_base)
+            warn.pack(pady=(10, 0), padx=20, anchor="w", before=self._main_frame)
+    
     # ========== 事件处理 ==========
     
     def _on_mode_change(self):
@@ -318,6 +321,7 @@ class CropperApp(ttk.Frame):
             self.page_spin.config(state="disabled")
         else:
             if self.mode_var.get() == "FILE" and self.source_files:
+                from controllers import FileController
                 first = self.source_files[0]
                 if FileController.is_pdf(first):
                     self.page_frame.pack(fill="x")
@@ -356,6 +360,12 @@ class CropperApp(ttk.Frame):
     
     def _select_files(self):
         """选择文件"""
+        from controllers import FileController
+        try:
+            import pymupdf
+        except ImportError:
+            pymupdf = None
+        
         filetypes = [
             ("支持的格式", "*.pdf *.png *.jpg *.jpeg *.bmp *.tiff *.tif *.webp *.gif"),
             ("PDF 文件", "*.pdf"),
@@ -371,9 +381,9 @@ class CropperApp(ttk.Frame):
                 self.file_path_var.set(paths[0])
                 
                 # PDF 获取页数
-                if FileController.is_pdf(paths[0]) and fitz:
+                if FileController.is_pdf(paths[0]) and pymupdf:
                     try:
-                        doc = fitz.open(paths[0])
+                        doc = pymupdf.open(paths[0])
                         count = len(doc)
                         doc.close()
                         self.total_pages_var.set(count)

@@ -6,17 +6,6 @@
 import os
 import re
 import tempfile
-from PIL import Image
-
-try:
-    import fitz
-    HAS_FITZ = True
-except ImportError:
-    fitz = None
-    HAS_FITZ = False
-
-from detector import get_bbox
-from controllers import get_ppt_controller, FileController, CURRENT_OS
 
 
 class CropProcessor:
@@ -36,6 +25,7 @@ class CropProcessor:
     
     def process_ppt(self, config):
         """处理 PPT"""
+        from controllers import get_ppt_controller
         controller = get_ppt_controller()
         
         if not controller.check_connection():
@@ -113,6 +103,7 @@ class CropProcessor:
                 controller.export_single_image(temp_img, target_width, index=idx)
                 
                 if os.path.exists(temp_img):
+                    from PIL import Image
                     img = Image.open(temp_img)
                     cropped = self._crop_image(img, padding, threshold, sensitivity, detect_mode)
                     
@@ -134,6 +125,8 @@ class CropProcessor:
     
     def process_file(self, config):
         """处理本地文件 (PDF 或图片)"""
+        from controllers import FileController
+        
         paths = config.get("source_files", [])
         if not paths:
             self.log("未选择文件", "ERROR")
@@ -148,10 +141,13 @@ class CropProcessor:
     
     def _process_pdf(self, config, pdf_path):
         """处理 PDF"""
-        if not HAS_FITZ:
-            self.log("未安装 pymupdf", "ERROR")
+        try:
+            import pymupdf
+        except ImportError:
+            self.log("未安装 pymupdf，请运行: pip install pymupdf", "ERROR")
             return None
         
+        from controllers import FileController
         controller = FileController()
         total_pages = controller.get_pdf_page_count(pdf_path)
         
@@ -171,7 +167,7 @@ class CropProcessor:
         if out_fmt in ["PDF", "SVG"]:
             temp_pdf = os.path.join(tempfile.gettempdir(), f"temp_{os.getpid()}.pdf")
             try:
-                doc = fitz.open(pdf_path)
+                doc = pymupdf.open(pdf_path)
                 if scope != "ALL":
                     doc.select([page_num - 1])
                 doc.save(temp_pdf)
@@ -218,6 +214,8 @@ class CropProcessor:
     
     def _process_images(self, config, paths):
         """处理图片"""
+        from controllers import FileController
+        
         output_dir = config.get("output_dir") or os.path.dirname(paths[0])
         out_fmt = config["output_format"]
         if out_fmt in ["PDF", "SVG"]:
@@ -263,6 +261,7 @@ class CropProcessor:
     
     def _crop_image(self, img, padding, threshold, sensitivity, detect_mode):
         """裁剪图片"""
+        from detector import get_bbox
         bbox = get_bbox(img, threshold, sensitivity, detect_mode)
         if bbox is None:
             return None
@@ -278,20 +277,24 @@ class CropProcessor:
     
     def _process_vector_crop(self, source_pdf, out_fmt, final_path, padding, threshold, sensitivity, detect_mode, base_name):
         """矢量裁剪"""
-        doc = fitz.open(source_pdf)
+        import pymupdf
+        from PIL import Image
+        from detector import get_bbox
+        
+        doc = pymupdf.open(source_pdf)
         total = len(doc)
         
         for i, page in enumerate(doc):
             self.set_status(f"分析第 {i+1}/{total} 页...")
             self.set_progress((i + 1) / total * 100)
             
-            pix = page.get_pixmap(matrix=fitz.Matrix(2, 2), alpha=False)
+            pix = page.get_pixmap(matrix=pymupdf.Matrix(2, 2), alpha=False)
             img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
             bbox = get_bbox(img, threshold, sensitivity, detect_mode)
             
             if bbox:
                 scale = 2.0
-                page.set_cropbox(fitz.Rect(
+                page.set_cropbox(pymupdf.Rect(
                     max(0, bbox[0] - padding * scale) / scale,
                     max(0, bbox[1] - padding * scale) / scale,
                     min(pix.width, bbox[2] + padding * scale) / scale,

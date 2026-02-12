@@ -9,13 +9,14 @@ Usage:
 
 import platform
 import tkinter as tk
-from ui import CropperApp
 
 VERSION = "0.1"
 CURRENT_OS = platform.system()
 
 
 def main():
+    from ui import CropperApp
+
     # Windows DPI 适配（必须在创建窗口前）
     if CURRENT_OS == "Windows":
         try:

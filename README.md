@@ -78,14 +78,7 @@
 ## 安装
 
 ```bash
-# 必需依赖
-pip install Pillow numpy pymupdf
-
-# Windows 连接 PPT 需要
-pip install pywin32
-
-# 可选，提升智能模式检测效果
-pip install scipy
+pip install -r requirements.txt
 ```
 
 ## 使用
