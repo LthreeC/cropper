@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-白边裁剪工具 v0.2
+白边裁剪工具 v0.3
 主入口 - 直接运行此文件
 
 Usage:
@@ -10,7 +10,7 @@ Usage:
 import platform
 import tkinter as tk
 
-VERSION = "0.2"
+VERSION = "0.3"
 CURRENT_OS = platform.system()
 
 

@@ -21,6 +21,7 @@ class CropperApp(ttk.Frame):
         self.master = master
         self.is_processing = False
         self.source_files = []
+        self.transparent_files = []
         
         self._setup_styles()
         self._init_variables()
@@ -68,13 +69,31 @@ class CropperApp(ttk.Frame):
         
         self.status_var = tk.StringVar(value="就绪")
         self.progress_var = tk.DoubleVar(value=0)
+
+        self.transparent_file_path_var = tk.StringVar()
+        self.transparent_info_var = tk.StringVar(value="支持 SVG、PNG、JPG、BMP、TIFF、WebP 等格式")
+        self.transparent_color_mode_var = tk.StringVar(value="corners")
+        self.transparent_custom_color_var = tk.StringVar(value="#FFFFFF")
+        self.transparent_tolerance_var = tk.IntVar(value=18)
+        self.transparent_tolerance_label_var = tk.StringVar(value="18")
+        self.transparent_feather_var = tk.IntVar(value=1)
+        self.transparent_feather_label_var = tk.StringVar(value="1")
+        self.transparent_edge_only_var = tk.BooleanVar(value=True)
+        self.transparent_format_var = tk.StringVar(value="PNG")
+        self.transparent_output_dir_var = tk.StringVar(value="<与源文件同目录>")
+        self.transparent_status_var = tk.StringVar(value="就绪")
+        self.transparent_progress_var = tk.DoubleVar(value=0)
     
     def _create_ui(self):
         """创建界面"""
-        # 主内容区
-        main = ttk.Frame(self, padding=20)
-        main.pack(fill="both", expand=True)
-        self._main_frame = main
+        notebook = ttk.Notebook(self)
+        notebook.pack(fill="both", expand=True, padx=20, pady=20)
+        self._main_frame = notebook
+
+        main = ttk.Frame(notebook, padding=20)
+        transparent_tab = ttk.Frame(notebook, padding=20)
+        notebook.add(main, text="白边裁剪")
+        notebook.add(transparent_tab, text="背景透明")
         
         # 1. 来源
         self._create_source_section(main)
@@ -93,6 +112,8 @@ class CropperApp(ttk.Frame):
         
         # 6. 日志
         self._create_log_section(main)
+
+        self._create_transparency_tab(transparent_tab)
         
         # 延迟检查 pymupdf 可用性（不阻塞窗口显示）
         self.after(0, self._deferred_pymupdf_check)
@@ -284,6 +305,122 @@ class CropperApp(ttk.Frame):
         self.log_text.tag_configure("SUCCESS", foreground="#28a745")
         self.log_text.tag_configure("WARNING", foreground="#f39c12")
         self.log_text.tag_configure("ERROR", foreground="#dc3545")
+
+    def _create_transparency_tab(self, parent):
+        """创建背景透明处理页"""
+        self._create_transparency_source_section(parent)
+        self._create_transparency_params_section(parent)
+        self._create_transparency_output_section(parent)
+        self._create_transparency_action_section(parent)
+        self._create_transparency_log_section(parent)
+
+        self.transparent_tolerance_var.trace("w", lambda *_: self.transparent_tolerance_label_var.set(
+            str(self.transparent_tolerance_var.get())))
+        self.transparent_feather_var.trace("w", lambda *_: self.transparent_feather_label_var.set(
+            str(self.transparent_feather_var.get())))
+
+    def _create_transparency_source_section(self, parent):
+        frame = ttk.LabelFrame(parent, text="来源", padding=(20, 15))
+        frame.pack(fill="x", pady=(0, 12))
+
+        row = ttk.Frame(frame)
+        row.pack(fill="x")
+
+        ttk.Label(row, text="文件:").pack(side="left")
+        ttk.Entry(row, textvariable=self.transparent_file_path_var, font=self.font_base).pack(
+            side="left", fill="x", expand=True, padx=(10, 10))
+        ttk.Button(row, text="浏览", command=self._select_transparent_files).pack(side="left")
+
+        ttk.Label(frame, textvariable=self.transparent_info_var, foreground="gray").pack(anchor="w", pady=(8, 0))
+
+    def _create_transparency_params_section(self, parent):
+        frame = ttk.LabelFrame(parent, text="透明参数", padding=(20, 15))
+        frame.pack(fill="x", pady=(0, 12))
+
+        row1 = ttk.Frame(frame)
+        row1.pack(fill="x", pady=(0, 12))
+        ttk.Label(row1, text="目标颜色:", width=10).pack(side="left")
+        for text, val in [("四角平均", "corners"), ("左上角", "top_left"), ("自定义", "custom")]:
+            ttk.Radiobutton(row1, text=text, variable=self.transparent_color_mode_var,
+                            value=val).pack(side="left", padx=(15, 0))
+        ttk.Entry(row1, textvariable=self.transparent_custom_color_var, width=10,
+                  font=self.font_base).pack(side="left", padx=(20, 0))
+
+        row2 = ttk.Frame(frame)
+        row2.pack(fill="x", pady=(0, 12))
+        ttk.Label(row2, text="容差:", width=10).pack(side="left")
+        ttk.Scale(row2, from_=0, to=100, variable=self.transparent_tolerance_var,
+                  orient="horizontal", length=160).pack(side="left")
+        ttk.Label(row2, textvariable=self.transparent_tolerance_label_var,
+                  width=4, font=self.font_title).pack(side="left", padx=(10, 0))
+        ttk.Label(row2, text="越高=去除更多相近颜色", foreground="#888888").pack(side="left", padx=(15, 0))
+
+        row3 = ttk.Frame(frame)
+        row3.pack(fill="x", pady=(0, 12))
+        ttk.Label(row3, text="边缘羽化:", width=10).pack(side="left")
+        ttk.Scale(row3, from_=0, to=8, variable=self.transparent_feather_var,
+                  orient="horizontal", length=160).pack(side="left")
+        ttk.Label(row3, textvariable=self.transparent_feather_label_var,
+                  width=4, font=self.font_title).pack(side="left", padx=(10, 0))
+        ttk.Label(row3, text="px", foreground="gray").pack(side="left", padx=(5, 0))
+
+        row4 = ttk.Frame(frame)
+        row4.pack(fill="x")
+        ttk.Checkbutton(row4, text="只处理连到图片边缘的背景",
+                        variable=self.transparent_edge_only_var).pack(side="left")
+
+    def _create_transparency_output_section(self, parent):
+        frame = ttk.LabelFrame(parent, text="输出设置", padding=(20, 15))
+        frame.pack(fill="x", pady=(0, 12))
+
+        row1 = ttk.Frame(frame)
+        row1.pack(fill="x", pady=(0, 12))
+        ttk.Label(row1, text="格式:").pack(side="left")
+        ttk.Combobox(row1, textvariable=self.transparent_format_var,
+                     values=["PNG", "WebP"], state="readonly",
+                     width=8, font=self.font_base).pack(side="left", padx=(10, 0))
+
+        row2 = ttk.Frame(frame)
+        row2.pack(fill="x")
+        ttk.Label(row2, text="保存到:").pack(side="left")
+        ttk.Entry(row2, textvariable=self.transparent_output_dir_var, font=self.font_base).pack(
+            side="left", fill="x", expand=True, padx=(10, 10))
+        ttk.Button(row2, text="选择", command=self._select_transparent_output_dir).pack(side="left")
+
+    def _create_transparency_action_section(self, parent):
+        frame = ttk.Frame(parent)
+        frame.pack(fill="x", pady=(0, 12))
+
+        ttk.Label(frame, textvariable=self.transparent_status_var,
+                  foreground="#0066cc").pack(fill="x", pady=(0, 8))
+        ttk.Progressbar(frame, variable=self.transparent_progress_var,
+                        maximum=100).pack(fill="x", pady=(0, 12))
+        self.btn_transparent_start = ttk.Button(
+            frame, text="开始处理透明背景", style="Big.TButton",
+            command=self._start_transparency_processing)
+        self.btn_transparent_start.pack(fill="x", ipady=6)
+
+    def _create_transparency_log_section(self, parent):
+        frame = ttk.LabelFrame(parent, text="日志", padding=(10, 10))
+        frame.pack(fill="both", expand=True)
+
+        container = ttk.Frame(frame)
+        container.pack(fill="both", expand=True)
+
+        self.transparent_log_text = tk.Text(container, height=14, font=self.font_log,
+                                            bg="#fafafa", relief="flat", wrap="word",
+                                            padx=10, pady=8, spacing3=4)
+        self.transparent_log_text.pack(side="left", fill="both", expand=True)
+
+        scrollbar = ttk.Scrollbar(container, orient="vertical", command=self.transparent_log_text.yview)
+        scrollbar.pack(side="right", fill="y")
+        self.transparent_log_text.config(yscrollcommand=scrollbar.set, state="disabled")
+
+        self.transparent_log_text.tag_configure("TIME", foreground="#999999")
+        self.transparent_log_text.tag_configure("INFO", foreground="#333333")
+        self.transparent_log_text.tag_configure("SUCCESS", foreground="#28a745")
+        self.transparent_log_text.tag_configure("WARNING", foreground="#f39c12")
+        self.transparent_log_text.tag_configure("ERROR", foreground="#dc3545")
     
     # ========== 延迟检查 ==========
     
@@ -410,6 +547,32 @@ class CropperApp(ttk.Frame):
         path = filedialog.askdirectory()
         if path:
             self.output_dir_var.set(path)
+
+    def _select_transparent_files(self):
+        """选择透明背景处理文件"""
+        filetypes = [
+            ("支持的图片", "*.svg *.png *.jpg *.jpeg *.bmp *.tiff *.tif *.webp *.gif"),
+            ("SVG 文件", "*.svg"),
+            ("图片文件", "*.png *.jpg *.jpeg *.bmp *.tiff *.tif *.webp *.gif"),
+            ("所有文件", "*.*")
+        ]
+        paths = filedialog.askopenfilenames(filetypes=filetypes)
+
+        if paths:
+            self.transparent_files = list(paths)
+            if len(paths) == 1:
+                self.transparent_file_path_var.set(paths[0])
+                ext = os.path.splitext(paths[0])[1].lower().lstrip(".").upper()
+                self.transparent_info_var.set(f"{ext or '图片'} 文件")
+            else:
+                self.transparent_file_path_var.set(f"[已选择 {len(paths)} 个文件]")
+                self.transparent_info_var.set(f"已选择 {len(paths)} 个文件，将批量处理")
+
+    def _select_transparent_output_dir(self):
+        """选择透明背景输出目录"""
+        path = filedialog.askdirectory()
+        if path:
+            self.transparent_output_dir_var.set(path)
     
     def log(self, message, level="INFO"):
         """记录日志"""
@@ -421,6 +584,24 @@ class CropperApp(ttk.Frame):
         self.log_text.insert("end", f"{message}\n", level)
         self.log_text.see("end")
         self.log_text.config(state="disabled")
+
+    def transparent_log(self, message, level="INFO"):
+        """记录透明背景日志"""
+        import datetime
+        ts = datetime.datetime.now().strftime("%H:%M:%S")
+
+        self.transparent_log_text.config(state="normal")
+        self.transparent_log_text.insert("end", f"[{ts}] ", "TIME")
+        self.transparent_log_text.insert("end", f"{message}\n", level)
+        self.transparent_log_text.see("end")
+        self.transparent_log_text.config(state="disabled")
+
+    def _set_processing_buttons(self, is_processing):
+        state = "disabled" if is_processing else "normal"
+        if hasattr(self, "btn_start"):
+            self.btn_start.config(state=state)
+        if hasattr(self, "btn_transparent_start"):
+            self.btn_transparent_start.config(state=state)
     
     def _start_processing(self):
         """开始处理"""
@@ -428,7 +609,7 @@ class CropperApp(ttk.Frame):
             return
         
         self.is_processing = True
-        self.btn_start.config(state="disabled")
+        self._set_processing_buttons(True)
         self.progress_var.set(0)
         
         # 分隔线
@@ -437,6 +618,22 @@ class CropperApp(ttk.Frame):
         self.log_text.config(state="disabled")
         
         thread = threading.Thread(target=self._run_processing, daemon=True)
+        thread.start()
+
+    def _start_transparency_processing(self):
+        """开始处理透明背景"""
+        if self.is_processing:
+            return
+
+        self.is_processing = True
+        self._set_processing_buttons(True)
+        self.transparent_progress_var.set(0)
+
+        self.transparent_log_text.config(state="normal")
+        self.transparent_log_text.insert("end", "─" * 50 + "\n", "TIME")
+        self.transparent_log_text.config(state="disabled")
+
+        thread = threading.Thread(target=self._run_transparency_processing, daemon=True)
         thread.start()
     
     def _run_processing(self):
@@ -503,8 +700,57 @@ class CropperApp(ttk.Frame):
         
         finally:
             self.is_processing = False
-            self.after(0, lambda: self.btn_start.config(state="normal"))
+            self.after(0, lambda: self._set_processing_buttons(False))
             self.after(0, lambda: self.status_var.set("就绪"))
+
+    def _run_transparency_processing(self):
+        """透明背景处理线程"""
+        from processor import CropProcessor
+
+        try:
+            def callback(status, log_entry, progress):
+                if status:
+                    self.after(0, lambda: self.transparent_status_var.set(status))
+                if log_entry:
+                    level, msg = log_entry
+                    self.after(0, lambda: self.transparent_log(msg, level))
+                if progress is not None:
+                    self.after(0, lambda: self.transparent_progress_var.set(progress))
+
+            processor = CropProcessor(callback=callback)
+
+            config = {
+                "source_files": self.transparent_files,
+                "output_dir": self.transparent_output_dir_var.get()
+                if self.transparent_output_dir_var.get() != "<与源文件同目录>" else None,
+                "output_format": self.transparent_format_var.get(),
+                "color_mode": self.transparent_color_mode_var.get(),
+                "custom_color": self.transparent_custom_color_var.get(),
+                "tolerance": self.transparent_tolerance_var.get(),
+                "edge_only": self.transparent_edge_only_var.get(),
+                "feather": self.transparent_feather_var.get(),
+                "dpi": 300,
+            }
+
+            result = None
+            if not self.transparent_files:
+                self.after(0, lambda: self.transparent_log("请先选择文件", "ERROR"))
+            else:
+                result = processor.process_transparency(config)
+
+            self.after(0, lambda: self.transparent_progress_var.set(100))
+            if result:
+                self._open_folder(result)
+
+        except Exception as e:
+            self.after(0, lambda: self.transparent_log(f"处理失败: {e}", "ERROR"))
+            import traceback
+            traceback.print_exc()
+
+        finally:
+            self.is_processing = False
+            self.after(0, lambda: self._set_processing_buttons(False))
+            self.after(0, lambda: self.transparent_status_var.set("就绪"))
     
     def _open_folder(self, path):
         """打开文件夹"""

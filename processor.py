@@ -303,6 +303,70 @@ class CropProcessor:
         self.log(f"{os.path.basename(path)}: 未检测到内容", "WARNING")
         return None
 
+    def process_transparency(self, config):
+        """将图片背景处理为透明"""
+        from controllers import FileController
+        from transparency import make_transparent, rgb_to_hex
+
+        paths = config.get("source_files", [])
+        if not paths:
+            self.log("未选择文件", "ERROR")
+            return None
+
+        output_dir = config.get("output_dir") or os.path.dirname(paths[0])
+        os.makedirs(output_dir, exist_ok=True)
+
+        out_fmt = config.get("output_format", "PNG").upper()
+        if out_fmt not in ("PNG", "WEBP"):
+            out_fmt = "PNG"
+
+        controller = FileController()
+        dpi = config.get("dpi", 300)
+        results = []
+
+        for i, path in enumerate(paths):
+            self.set_status(f"透明背景 {i+1}/{len(paths)}...")
+            self.set_progress((i + 1) / len(paths) * 100)
+
+            try:
+                if FileController.is_pdf(path):
+                    self.log(f"{os.path.basename(path)}: 透明背景暂不支持 PDF", "WARNING")
+                    continue
+
+                if FileController.is_svg(path):
+                    img = controller.render_document_page(path, 0, dpi=dpi)
+                    image_dpi = dpi
+                else:
+                    img = controller.load_image(path)
+                    original_dpi = img.info.get("dpi", (dpi, dpi))
+                    image_dpi = original_dpi[0] if isinstance(original_dpi, tuple) else original_dpi
+
+                transparent, color, ratio = make_transparent(
+                    img,
+                    color_mode=config.get("color_mode", "corners"),
+                    custom_color=config.get("custom_color", "#FFFFFF"),
+                    tolerance=config.get("tolerance", 18),
+                    edge_only=config.get("edge_only", True),
+                    feather=config.get("feather", 1),
+                )
+
+                base_name = self._safe_name(os.path.splitext(os.path.basename(path))[0])
+                save_path = os.path.join(output_dir, f"{base_name}_transparent.{out_fmt.lower()}")
+                self._save_transparent_image(transparent, save_path, out_fmt, image_dpi)
+                results.append(save_path)
+
+                if ratio > 0:
+                    self.log(f"{os.path.basename(path)} 完成，已移除 {ratio:.1%}，颜色 {rgb_to_hex(color)}")
+                else:
+                    self.log(f"{os.path.basename(path)}: 未找到匹配背景，已保存原图透明通道", "WARNING")
+            except Exception as e:
+                self.log(f"{os.path.basename(path)} 失败: {e}", "ERROR")
+
+        if results:
+            self.log(f"透明背景完成 {len(results)} 个文件", "SUCCESS")
+            return output_dir
+        return None
+
     def _crop_image(self, img, padding, threshold, sensitivity, detect_mode):
         """裁剪图片"""
         from detector import get_bbox
@@ -391,6 +455,16 @@ class CropProcessor:
             kwargs["quality"] = 95
         
         img.save(path, **kwargs)
+
+    def _save_transparent_image(self, img, path, fmt, dpi):
+        """保存带透明通道的图片"""
+        if img.mode != "RGBA":
+            img = img.convert("RGBA")
+
+        if fmt.upper() == "WEBP":
+            img.save(path, "WEBP", quality=95, lossless=True, method=6)
+        else:
+            img.save(path, "PNG", dpi=(dpi, dpi), optimize=True)
     
     def _save_raster_as_svg(self, img, path, dpi):
         """将位图裁剪结果嵌入 SVG 输出"""
