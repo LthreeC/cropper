@@ -182,7 +182,9 @@ class MacPPTController(BaseController):
 class FileController(BaseController):
     """本地文件控制器 (PDF + 图片)"""
     
-    IMAGE_FORMATS = {'.png', '.jpg', '.jpeg', '.bmp', '.tiff', '.tif', '.webp', '.gif'}
+    RASTER_FORMATS = {'.png', '.jpg', '.jpeg', '.bmp', '.tiff', '.tif', '.webp', '.gif'}
+    VECTOR_FORMATS = {'.svg'}
+    IMAGE_FORMATS = RASTER_FORMATS | VECTOR_FORMATS
     
     def __init__(self):
         self.file_paths = []
@@ -205,7 +207,7 @@ class FileController(BaseController):
         
         if self.file_paths:
             ext = os.path.splitext(self.file_paths[0])[1].lower()
-            self.file_type = "pdf" if ext == '.pdf' else "image"
+            self.file_type = "pdf" if ext == '.pdf' else "svg" if ext == '.svg' else "image"
     
     def get_file_count(self):
         return len(self.file_paths)
@@ -219,24 +221,36 @@ class FileController(BaseController):
         if not path:
             return 0
         doc = pymupdf.open(path)
-        count = len(doc)
-        doc.close()
+        try:
+            count = len(doc)
+        finally:
+            doc.close()
         return count
-    
-    def render_pdf_page(self, path, page_index, dpi=300):
-        """渲染 PDF 页面"""
+
+    def render_document_page(self, path, page_index=0, dpi=300):
+        """渲染 PDF/SVG 页面"""
         from PIL import Image
         pymupdf = _lazy_import_pymupdf()
+        if not pymupdf:
+            raise ImportError("未安装 pymupdf，无法处理 PDF/SVG")
         doc = pymupdf.open(path)
-        page = doc[page_index]
-        zoom = dpi / 72.0
-        pix = page.get_pixmap(matrix=pymupdf.Matrix(zoom, zoom), alpha=False)
-        img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
-        doc.close()
+        try:
+            page = doc[page_index]
+            zoom = dpi / 72.0
+            pix = page.get_pixmap(matrix=pymupdf.Matrix(zoom, zoom), alpha=False)
+            img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+        finally:
+            doc.close()
         return img
-    
+
+    def render_pdf_page(self, path, page_index, dpi=300):
+        """渲染 PDF 页面"""
+        return self.render_document_page(path, page_index, dpi)
+
     def load_image(self, path):
         """加载图片"""
+        if self.is_svg(path):
+            return self.render_document_page(path, 0)
         from PIL import Image
         return Image.open(path)
     
@@ -248,6 +262,10 @@ class FileController(BaseController):
     @classmethod
     def is_pdf(cls, path):
         return os.path.splitext(path)[1].lower() == '.pdf'
+
+    @classmethod
+    def is_svg(cls, path):
+        return os.path.splitext(path)[1].lower() == '.svg'
 
 
 def get_ppt_controller():

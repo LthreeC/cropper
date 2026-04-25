@@ -108,7 +108,7 @@ class CropperApp(ttk.Frame):
         
         ttk.Radiobutton(mode_row, text="PowerPoint", variable=self.mode_var, 
                        value="PPT", command=self._on_mode_change).pack(side="left", padx=(0, 30))
-        ttk.Radiobutton(mode_row, text="本地文件 (PDF/图片)", variable=self.mode_var,
+        ttk.Radiobutton(mode_row, text="本地文件 (PDF/图片/SVG)", variable=self.mode_var,
                        value="FILE", command=self._on_mode_change).pack(side="left")
         
         # PPT 连接区
@@ -132,7 +132,7 @@ class CropperApp(ttk.Frame):
             side="left", fill="x", expand=True, padx=(10, 10))
         ttk.Button(file_row, text="浏览", command=self._select_files).pack(side="left")
         
-        self.file_info = ttk.Label(self.file_frame, text="支持 PDF、PNG、JPG、BMP、TIFF、WebP 等格式", 
+        self.file_info = ttk.Label(self.file_frame, text="支持 PDF、SVG、PNG、JPG、BMP、TIFF、WebP 等格式",
                                    foreground="gray")
         self.file_info.pack(anchor="w", pady=(8, 0))
     
@@ -291,7 +291,7 @@ class CropperApp(ttk.Frame):
         """延迟检查 pymupdf 是否可用"""
         from controllers import has_pymupdf
         if not has_pymupdf():
-            warn = ttk.Label(self, text="提示: 安装 pymupdf 可支持 PDF 处理 (pip install pymupdf)", 
+            warn = ttk.Label(self, text="提示: 安装 pymupdf 可支持 PDF/SVG 处理 (pip install pymupdf)",
                            foreground="orange", font=self.font_base)
             warn.pack(pady=(10, 0), padx=20, anchor="w", before=self._main_frame)
     
@@ -367,9 +367,10 @@ class CropperApp(ttk.Frame):
             pymupdf = None
         
         filetypes = [
-            ("支持的格式", "*.pdf *.png *.jpg *.jpeg *.bmp *.tiff *.tif *.webp *.gif"),
+            ("支持的格式", "*.pdf *.svg *.png *.jpg *.jpeg *.bmp *.tiff *.tif *.webp *.gif"),
             ("PDF 文件", "*.pdf"),
-            ("图片文件", "*.png *.jpg *.jpeg *.bmp *.tiff *.tif *.webp *.gif"),
+            ("SVG 文件", "*.svg"),
+            ("图片文件", "*.svg *.png *.jpg *.jpeg *.bmp *.tiff *.tif *.webp *.gif"),
             ("所有文件", "*.*")
         ]
         paths = filedialog.askopenfilenames(filetypes=filetypes)
@@ -393,6 +394,9 @@ class CropperApp(ttk.Frame):
                         self.file_info.config(text=f"PDF 文件，共 {count} 页")
                     except:
                         pass
+                elif FileController.is_svg(paths[0]):
+                    self.page_frame.pack_forget()
+                    self.file_info.config(text="SVG 文件")
                 else:
                     self.page_frame.pack_forget()
                     self.file_info.config(text="图片文件")

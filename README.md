@@ -21,7 +21,7 @@
 - 可转换为 SVG 矢量格式，方便在网页或设计软件中使用
 
 ### 🖼️ 处理图片文件
-- 支持 **PNG、JPG、JPEG、BMP、TIFF、WebP、GIF** 等常见格式
+- 支持 **SVG、PNG、JPG、JPEG、BMP、TIFF、WebP、GIF** 等常见格式
 - 批量选择多张图片一次性处理
 - 网页截图、软件界面截图、扫描件去白边
 - 产品图片、证件照、素材图批量裁剪
@@ -60,13 +60,13 @@
 | PPT 导出后还要再处理 | 直接连接 PPT，导出即去白边 |
 | PDF 裁剪后变成位图，画质损失 | 保持矢量格式，画质无损 |
 | 在线工具有隐私风险 | 本地运行，文件不上传 |
-| 不同软件处理不同格式 | 一个工具搞定 PPT/PDF/图片 |
+| 不同软件处理不同格式 | 一个工具搞定 PPT/PDF/SVG/图片 |
 
 ---
 
 ## 功能特点
 
-- **多来源支持**: PowerPoint (Windows/Mac)、WPS演示文稿、PDF 文件、图片文件 (PNG/JPG/BMP/TIFF/WebP/GIF)
+- **多来源支持**: PowerPoint (Windows/Mac)、WPS演示文稿、PDF 文件、图片文件 (SVG/PNG/JPG/BMP/TIFF/WebP/GIF)
 - **智能检测**: 三种检测模式适应不同场景，可调节阈值和敏感度
 - **批量处理**: 一次处理多页 PPT/PDF 或多个图片文件，大幅提升效率
 - **多格式输出**: PDF、SVG (矢量无损)、PNG、TIFF (位图无损)、JPEG、WebP (位图压缩)
@@ -78,7 +78,7 @@
 ## 安装
 
 ```bash
-pip install -r requirements.txt
+pip install -r requirement.txt
 ```
 
 ## 使用
@@ -86,6 +86,15 @@ pip install -r requirements.txt
 ```bash
 python main.py
 ```
+
+## 打包
+
+```powershell
+.\build.ps1
+```
+
+输出文件位于 `dist/cropper-v0.2.exe`。
+如果正在运行旧版 exe，请先关闭后再打包。
 
 ## 参数详解
 
@@ -187,7 +196,7 @@ python main.py
 ├── processor.py     # 核心处理逻辑
 ├── detector.py      # 白边检测算法
 ├── controllers.py   # 数据源控制器
-├── requirements.txt # 依赖列表
+├── requirement.txt  # 依赖列表
 └── README.md        # 说明文档
 ```
 

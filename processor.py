@@ -55,7 +55,7 @@ class CropProcessor:
         sensitivity = config["sensitivity"]
         detect_mode = config["detect_mode"]
         
-        temp_pdf = os.path.join(tempfile.gettempdir(), f"temp_{os.getpid()}.pdf")
+        temp_pdf = self._make_temp_path(".pdf")
         
         try:
             self.set_status("导出 PDF...")
@@ -66,8 +66,9 @@ class CropProcessor:
             else:
                 final_path = os.path.join(output_dir, f"{base_name}_p{current_index}.{out_fmt.lower()}")
             
-            self._process_vector_crop(temp_pdf, out_fmt, final_path, padding, threshold, sensitivity, detect_mode, base_name)
-            return final_path
+            return self._process_vector_crop(
+                temp_pdf, out_fmt, final_path, padding, threshold, sensitivity, detect_mode, base_name
+            )
         finally:
             if os.path.exists(temp_pdf):
                 os.remove(temp_pdf)
@@ -165,21 +166,24 @@ class CropProcessor:
         dpi = config.get("dpi", 300)
         
         if out_fmt in ["PDF", "SVG"]:
-            temp_pdf = os.path.join(tempfile.gettempdir(), f"temp_{os.getpid()}.pdf")
+            temp_pdf = self._make_temp_path(".pdf")
             try:
                 doc = pymupdf.open(pdf_path)
-                if scope != "ALL":
-                    doc.select([page_num - 1])
-                doc.save(temp_pdf)
-                doc.close()
+                try:
+                    if scope != "ALL":
+                        doc.select([page_num - 1])
+                    doc.save(temp_pdf)
+                finally:
+                    doc.close()
                 
                 if scope == "ALL":
                     final_path = os.path.join(output_dir, f"{base_name}_Cropped.{out_fmt.lower()}")
                 else:
                     final_path = os.path.join(output_dir, f"{base_name}_p{page_num}.{out_fmt.lower()}")
                 
-                self._process_vector_crop(temp_pdf, out_fmt, final_path, padding, threshold, sensitivity, detect_mode, base_name)
-                return final_path
+                return self._process_vector_crop(
+                    temp_pdf, out_fmt, final_path, padding, threshold, sensitivity, detect_mode, base_name
+                )
             finally:
                 if os.path.exists(temp_pdf):
                     os.remove(temp_pdf)
@@ -217,14 +221,13 @@ class CropProcessor:
         from controllers import FileController
         
         output_dir = config.get("output_dir") or os.path.dirname(paths[0])
-        out_fmt = config["output_format"]
-        if out_fmt in ["PDF", "SVG"]:
-            out_fmt = "PNG"
+        requested_fmt = config["output_format"]
         
         padding = config["padding"]
         threshold = config["threshold"]
         sensitivity = config["sensitivity"]
         detect_mode = config["detect_mode"]
+        output_dpi = config.get("dpi", 300)
         
         results = []
         controller = FileController()
@@ -234,6 +237,15 @@ class CropProcessor:
             self.set_progress((i + 1) / len(paths) * 100)
             
             try:
+                if FileController.is_svg(path):
+                    result = self._process_svg_file(
+                        path, output_dir, requested_fmt, padding, threshold, sensitivity, detect_mode, output_dpi
+                    )
+                    if result:
+                        results.append(result)
+                    continue
+
+                out_fmt = "PNG" if requested_fmt == "PDF" else requested_fmt
                 img = controller.load_image(path)
                 original_dpi = img.info.get('dpi', (300, 300))
                 if isinstance(original_dpi, tuple):
@@ -259,6 +271,38 @@ class CropProcessor:
             return output_dir
         return None
     
+    def _process_svg_file(self, path, output_dir, out_fmt, padding, threshold, sensitivity, detect_mode, dpi):
+        """处理 SVG 输入"""
+        base_name = self._safe_name(os.path.splitext(os.path.basename(path))[0])
+
+        if out_fmt in ["PDF", "SVG"]:
+            temp_pdf = self._make_temp_path(".pdf")
+            try:
+                self._convert_to_pdf(path, temp_pdf)
+                save_path = os.path.join(output_dir, f"{base_name}_cropped.{out_fmt.lower()}")
+                result = self._process_vector_crop(
+                    temp_pdf, out_fmt, save_path, padding, threshold, sensitivity, detect_mode, base_name
+                )
+                self.log(f"{os.path.basename(path)} 完成")
+                return result
+            finally:
+                if os.path.exists(temp_pdf):
+                    os.remove(temp_pdf)
+
+        from controllers import FileController
+        controller = FileController()
+        img = controller.render_document_page(path, 0, dpi=dpi)
+        cropped = self._crop_image(img, padding, threshold, sensitivity, detect_mode)
+
+        if cropped:
+            save_path = os.path.join(output_dir, f"{base_name}_cropped.{out_fmt.lower()}")
+            self._save_image(cropped, save_path, out_fmt, dpi)
+            self.log(f"{os.path.basename(path)} 完成")
+            return save_path
+
+        self.log(f"{os.path.basename(path)}: 未检测到内容", "WARNING")
+        return None
+
     def _crop_image(self, img, padding, threshold, sensitivity, detect_mode):
         """裁剪图片"""
         from detector import get_bbox
@@ -282,42 +326,59 @@ class CropProcessor:
         from detector import get_bbox
         
         doc = pymupdf.open(source_pdf)
-        total = len(doc)
+        try:
+            total = len(doc)
         
-        for i, page in enumerate(doc):
-            self.set_status(f"分析第 {i+1}/{total} 页...")
-            self.set_progress((i + 1) / total * 100)
-            
-            pix = page.get_pixmap(matrix=pymupdf.Matrix(2, 2), alpha=False)
-            img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
-            bbox = get_bbox(img, threshold, sensitivity, detect_mode)
-            
-            if bbox:
-                scale = 2.0
-                page.set_cropbox(pymupdf.Rect(
-                    max(0, bbox[0] - padding * scale) / scale,
-                    max(0, bbox[1] - padding * scale) / scale,
-                    min(pix.width, bbox[2] + padding * scale) / scale,
-                    min(pix.height, bbox[3] + padding * scale) / scale
-                ))
-        
-        self.set_status("保存中...")
-        
-        if out_fmt == "PDF":
-            doc.save(final_path, garbage=4, deflate=True)
-            self.log(f"PDF 已保存: {final_path}", "SUCCESS")
-        elif out_fmt == "SVG":
-            svg_dir = os.path.dirname(final_path)
             for i, page in enumerate(doc):
-                svg_path = os.path.join(svg_dir, f"{base_name}_p{i+1}.svg")
-                with open(svg_path, "w", encoding="utf-8") as f:
-                    f.write(page.get_svg_image())
-            self.log("SVG 已导出", "SUCCESS")
+                self.set_status(f"分析第 {i+1}/{total} 页...")
+                self.set_progress((i + 1) / total * 100)
+            
+                pix = page.get_pixmap(matrix=pymupdf.Matrix(2, 2), alpha=False)
+                img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+                bbox = get_bbox(img, threshold, sensitivity, detect_mode)
+            
+                if bbox:
+                    scale = 2.0
+                    page.set_cropbox(pymupdf.Rect(
+                        max(0, bbox[0] - padding * scale) / scale,
+                        max(0, bbox[1] - padding * scale) / scale,
+                        min(pix.width, bbox[2] + padding * scale) / scale,
+                        min(pix.height, bbox[3] + padding * scale) / scale
+                    ))
+
+            self.set_status("保存中...")
+
+            if out_fmt == "PDF":
+                doc.save(final_path, garbage=4, deflate=True)
+                self.log(f"PDF 已保存: {final_path}", "SUCCESS")
+                result_path = final_path
+            elif out_fmt == "SVG":
+                if total == 1:
+                    svg_paths = [final_path]
+                    result_path = final_path
+                else:
+                    svg_dir = os.path.splitext(final_path)[0]
+                    os.makedirs(svg_dir, exist_ok=True)
+                    svg_paths = [os.path.join(svg_dir, f"{base_name}_p{i+1:03d}.svg") for i in range(total)]
+                    result_path = svg_dir
+                for i, page in enumerate(doc):
+                    svg_path = svg_paths[i]
+                    with open(svg_path, "w", encoding="utf-8") as f:
+                        f.write(page.get_svg_image())
+                self.log(f"SVG 已导出: {result_path}", "SUCCESS")
+            else:
+                raise ValueError(f"不支持的矢量输出格式: {out_fmt}")
         
-        doc.close()
+            return result_path
+        finally:
+            doc.close()
     
     def _save_image(self, img, path, fmt, dpi):
         """保存图片"""
+        if fmt.upper() == "SVG":
+            self._save_raster_as_svg(img, path, dpi)
+            return
+
         kwargs = {"dpi": (dpi, dpi)}
         
         if fmt.upper() in ["JPEG", "JPG"]:
@@ -331,5 +392,45 @@ class CropProcessor:
         
         img.save(path, **kwargs)
     
+    def _save_raster_as_svg(self, img, path, dpi):
+        """将位图裁剪结果嵌入 SVG 输出"""
+        import base64
+        import io
+
+        if img.mode not in ("RGB", "RGBA"):
+            img = img.convert("RGBA")
+
+        buf = io.BytesIO()
+        img.save(buf, format="PNG", dpi=(dpi, dpi))
+        data = base64.b64encode(buf.getvalue()).decode("ascii")
+        width, height = img.size
+        svg = (
+            f'<svg xmlns="http://www.w3.org/2000/svg" '
+            f'width="{width}" height="{height}" viewBox="0 0 {width} {height}">\n'
+            f'  <image width="{width}" height="{height}" '
+            f'href="data:image/png;base64,{data}"/>\n'
+            f'</svg>\n'
+        )
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(svg)
+
+    def _convert_to_pdf(self, source_path, target_path):
+        """将 SVG 等矢量文档转换成临时 PDF，供统一裁剪流程使用"""
+        import pymupdf
+
+        doc = pymupdf.open(source_path)
+        try:
+            pdf_data = doc.convert_to_pdf()
+        finally:
+            doc.close()
+
+        with open(target_path, "wb") as f:
+            f.write(pdf_data)
+
+    def _make_temp_path(self, suffix):
+        fd, path = tempfile.mkstemp(prefix=f"cropper_{os.getpid()}_", suffix=suffix)
+        os.close(fd)
+        return path
+
     def _safe_name(self, name):
         return re.sub(r'[\\/*?:"<>|]', "", name) or "Export"
