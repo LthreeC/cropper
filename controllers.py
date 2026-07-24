@@ -8,6 +8,8 @@ import os
 import platform
 import subprocess
 
+from units import POINTS_PER_INCH
+
 CURRENT_OS = platform.system()
 
 
@@ -40,30 +42,49 @@ class BaseController:
     def get_page_setup(self):
         return 720, 540
 
+    def close(self):
+        pass
+
 
 class WindowsPPTController(BaseController):
     """Windows PPT 控制器"""
     
     def __init__(self):
         self.app = None
+        self.app_kind = None
+        self._pythoncom = None
     
     def _connect(self):
         try:
+            import pythoncom
             import win32com.client
-        except ImportError:
-            return False
+        except ImportError as e:
+            raise RuntimeError(
+                "未安装 pywin32，无法连接 PowerPoint；请使用项目 venv_clean 启动"
+            ) from e
+        if self._pythoncom is None:
+            pythoncom.CoInitialize()
+            self._pythoncom = pythoncom
         try:
             self.app = win32com.client.GetActiveObject("PowerPoint.Application")
+            self.app_kind = "PowerPoint"
             return True
         except:
             try:
                 self.app = win32com.client.GetActiveObject("Kwpp.Application")
+                self.app_kind = "WPS"
                 return True
             except:
                 return False
     
     def check_connection(self):
         return self._connect()
+
+    def close(self):
+        self.app = None
+        if self._pythoncom is not None:
+            self._pythoncom.CoUninitialize()
+            self._pythoncom = None
     
     def get_info(self):
         if not self.app or self.app.Windows.Count == 0:
@@ -88,25 +109,34 @@ class WindowsPPTController(BaseController):
     
     def export_single_image(self, save_path, width_px, index=1):
         slide = self.app.ActivePresentation.Slides(index)
-        slide.Export(save_path, "PNG", int(width_px))
+        ps = self.app.ActivePresentation.PageSetup
+        height_px = round(width_px * ps.SlideHeight / ps.SlideWidth)
+        slide.Export(save_path, "PNG", int(width_px), int(height_px))
     
     def export_temp_pdf(self, save_path, scope="CURRENT", index=1):
         presentation = self.app.ActivePresentation
         try:
             if scope == "ALL":
-                presentation.ExportAsFixedFormat(Path=save_path, FixedFormatType=2)
-            else:
-                presentation.PrintOptions.Ranges.ClearAll()
-                presentation.PrintOptions.Ranges.Add(Start=index, End=index)
                 presentation.ExportAsFixedFormat(
-                    Path=save_path, FixedFormatType=2, RangeType=4,
-                    PrintRange=presentation.PrintOptions.Ranges.Item(1)
+                    Path=save_path, FixedFormatType=2, Intent=2,
+                    PrintRange=None, RangeType=1
+                )
+            else:
+                presentation.ExportAsFixedFormat(
+                    Path=save_path, FixedFormatType=2, Intent=2,
+                    PrintRange=None, RangeType=3
                 )
         except Exception as e:
+            if self.app_kind != "WPS":
+                raise Exception(f"PowerPoint 高质量导出 PDF 失败: {e}") from e
             try:
                 presentation.SaveAs(save_path, 32)
             except Exception as e2:
                 raise Exception(f"导出PDF失败: {e} | {e2}")
+
+    def export_source_copy(self, save_path):
+        """保存临时 PPTX 副本，供恢复 PDF 中的原始位图。"""
+        self.app.ActivePresentation.SaveCopyAs(save_path, 24)
 
 
 class MacPPTController(BaseController):
@@ -236,7 +266,7 @@ class FileController(BaseController):
         doc = pymupdf.open(path)
         try:
             page = doc[page_index]
-            zoom = dpi / 72.0
+            zoom = dpi / POINTS_PER_INCH
             pix = page.get_pixmap(matrix=pymupdf.Matrix(zoom, zoom), alpha=False)
             img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
         finally:

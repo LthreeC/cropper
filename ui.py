@@ -12,6 +12,29 @@ from tkinter import ttk, filedialog
 
 CURRENT_OS = platform.system()
 
+DETECT_MODE_LABELS = {
+    "智能": "smart",
+    "简单": "simple",
+    "边缘敏感": "edge",
+}
+
+
+def get_output_quality_policy(mode, source_kind, output_format):
+    """返回质量控件类型和不会截断的简短说明。"""
+    if output_format in ("PDF", "SVG"):
+        if mode == "PPT":
+            return (
+                "pdf_image_dpi",
+                "文字和形状保持矢量；图片按所选最高 DPI 优化。",
+            )
+        if source_kind == "raster":
+            return "none", "嵌入裁剪后的原图像素，不重新采样。"
+        return "none", "只修改页面边界，保留源文件中的矢量和位图。"
+
+    if mode == "FILE" and source_kind == "raster":
+        return "none", "保留源图片像素尺寸和原始 DPI，不重新采样。"
+    return "dpi", "按所选 DPI 渲染位图；像素尺寸会随页面大小自动计算。"
+
 
 class CropperApp(ttk.Frame):
     """主应用界面"""
@@ -30,31 +53,34 @@ class CropperApp(ttk.Frame):
         self._on_format_change()
     
     def _setup_styles(self):
-        """设置样式 - 大字体"""
+        """设置紧凑、清晰的桌面样式。"""
         style = ttk.Style()
-        
+
         if CURRENT_OS == "Windows":
-            self.font_base = ("Microsoft YaHei UI", 12)
-            self.font_title = ("Microsoft YaHei UI", 12, "bold")
-            self.font_big = ("Microsoft YaHei UI", 14, "bold")
-            self.font_log = ("Consolas", 11)
+            self.font_base = ("Microsoft YaHei UI", 10)
+            self.font_title = ("Microsoft YaHei UI", 10, "bold")
+            self.font_big = ("Microsoft YaHei UI", 12, "bold")
+            self.font_log = ("Consolas", 9)
         else:
-            self.font_base = ("SF Pro Display", 14)
-            self.font_title = ("SF Pro Display", 14, "bold")
-            self.font_big = ("SF Pro Display", 16, "bold")
-            self.font_log = ("Menlo", 12)
-        
+            self.font_base = ("SF Pro Display", 12)
+            self.font_title = ("SF Pro Display", 12, "bold")
+            self.font_big = ("SF Pro Display", 14, "bold")
+            self.font_log = ("Menlo", 10)
+
         style.configure(".", font=self.font_base)
         style.configure("TLabelframe.Label", font=self.font_title)
-        style.configure("TButton", font=self.font_base, padding=10)
-        style.configure("Big.TButton", font=self.font_big, padding=(30, 16))
-    
+        style.configure("TButton", font=self.font_base, padding=(10, 6))
+        style.configure("Compact.TButton", font=self.font_base, padding=(8, 4))
+        style.configure("Big.TButton", font=self.font_big, padding=(24, 10))
+        style.configure("Hint.TLabel", foreground="#666666")
+
     def _init_variables(self):
         """初始化变量"""
         self.mode_var = tk.StringVar(value="PPT")
         self.scope_var = tk.StringVar(value="CURRENT")
         
         self.detect_mode_var = tk.StringVar(value="smart")
+        self.detect_mode_display_var = tk.StringVar(value="智能")
         self.threshold_var = tk.IntVar(value=250)
         self.sensitivity_var = tk.IntVar(value=15)
         self.padding_var = tk.StringVar(value="2")
@@ -62,6 +88,7 @@ class CropperApp(ttk.Frame):
         self.output_format_var = tk.StringVar(value="PDF")
         self.output_dir_var = tk.StringVar(value="<与源文件同目录>")
         self.dpi_var = tk.StringVar(value="300")
+        self.pdf_image_dpi_var = tk.StringVar(value="300")
         
         self.file_path_var = tk.StringVar()
         self.page_num_var = tk.IntVar(value=1)
@@ -83,345 +110,631 @@ class CropperApp(ttk.Frame):
         self.transparent_output_dir_var = tk.StringVar(value="<与源文件同目录>")
         self.transparent_status_var = tk.StringVar(value="就绪")
         self.transparent_progress_var = tk.DoubleVar(value=0)
+
+        self.detect_advanced_visible = False
+        self.transparent_advanced_visible = False
+        self.main_log_visible = False
+        self.transparent_log_visible = False
     
     def _create_ui(self):
-        """创建界面"""
+        """创建界面。"""
         notebook = ttk.Notebook(self)
-        notebook.pack(fill="both", expand=True, padx=20, pady=20)
+        notebook.pack(fill="both", expand=True, padx=12, pady=12)
         self._main_frame = notebook
 
-        main = ttk.Frame(notebook, padding=20)
-        transparent_tab = ttk.Frame(notebook, padding=20)
+        main = ttk.Frame(notebook, padding=(14, 12))
+        transparent_tab = ttk.Frame(notebook, padding=(14, 12))
         notebook.add(main, text="白边裁剪")
         notebook.add(transparent_tab, text="背景透明")
-        
-        # 1. 来源
+
         self._create_source_section(main)
-        
-        # 2. 范围
-        self._create_scope_section(main)
-        
-        # 3. 检测参数
         self._create_detect_section(main)
-        
-        # 4. 输出设置
         self._create_output_section(main)
-        
-        # 5. 操作
         self._create_action_section(main)
-        
-        # 6. 日志
         self._create_log_section(main)
 
         self._create_transparency_tab(transparent_tab)
-        
+
         # 延迟检查 pymupdf 可用性（不阻塞窗口显示）
         self.after(0, self._deferred_pymupdf_check)
-    
+
     def _create_source_section(self, parent):
-        """来源选择"""
-        frame = ttk.LabelFrame(parent, text="来源", padding=(20, 15))
-        frame.pack(fill="x", pady=(0, 12))
-        
-        # 模式选择行
+        """来源和处理范围合并为一个任务区。"""
+        frame = ttk.LabelFrame(parent, text="任务", padding=(14, 10))
+        frame.pack(fill="x", pady=(0, 10))
+
         mode_row = ttk.Frame(frame)
         mode_row.pack(fill="x")
-        
-        ttk.Radiobutton(mode_row, text="PowerPoint", variable=self.mode_var, 
-                       value="PPT", command=self._on_mode_change).pack(side="left", padx=(0, 30))
-        ttk.Radiobutton(mode_row, text="本地文件 (PDF/图片/SVG)", variable=self.mode_var,
-                       value="FILE", command=self._on_mode_change).pack(side="left")
-        
-        # PPT 连接区
-        self.ppt_frame = ttk.Frame(frame)
+        ttk.Label(mode_row, text="来源:", width=7).pack(side="left")
+        ttk.Radiobutton(
+            mode_row,
+            text="PowerPoint",
+            variable=self.mode_var,
+            value="PPT",
+            command=self._on_mode_change,
+        ).pack(side="left", padx=(0, 20))
+        ttk.Radiobutton(
+            mode_row,
+            text="本地文件",
+            variable=self.mode_var,
+            value="FILE",
+            command=self._on_mode_change,
+        ).pack(side="left")
+        ttk.Label(
+            mode_row,
+            text="PDF / SVG / 图片",
+            style="Hint.TLabel",
+        ).pack(side="left", padx=(8, 0))
+
+        self.source_detail_slot = ttk.Frame(frame)
+        self.source_detail_slot.pack(fill="x", pady=(8, 0))
+        self.source_detail_slot.columnconfigure(0, weight=1)
+
+        self.ppt_frame = ttk.Frame(self.source_detail_slot)
         ppt_row = ttk.Frame(self.ppt_frame)
-        ppt_row.pack(fill="x", pady=(12, 0))
-        
-        self.btn_connect = ttk.Button(ppt_row, text="检测连接", command=self._check_ppt)
+        ppt_row.pack(fill="x")
+        self.btn_connect = ttk.Button(
+            ppt_row,
+            text="检测连接",
+            command=self._check_ppt,
+            style="Compact.TButton",
+        )
         self.btn_connect.pack(side="left")
-        self.ppt_status = ttk.Label(ppt_row, text="", foreground="gray")
-        self.ppt_status.pack(side="left", padx=(15, 0))
-        
-        # 文件选择区
-        self.file_frame = ttk.Frame(frame)
-        
+        self.ppt_status = ttk.Label(
+            ppt_row,
+            text="",
+            foreground="gray",
+            justify="left",
+            wraplength=520,
+        )
+        self.ppt_status.pack(side="left", fill="x", expand=True, padx=(12, 0))
+
+        self.file_frame = ttk.Frame(self.source_detail_slot)
         file_row = ttk.Frame(self.file_frame)
-        file_row.pack(fill="x", pady=(12, 0))
-        
-        ttk.Label(file_row, text="文件:").pack(side="left")
-        ttk.Entry(file_row, textvariable=self.file_path_var, font=self.font_base).pack(
-            side="left", fill="x", expand=True, padx=(10, 10))
-        ttk.Button(file_row, text="浏览", command=self._select_files).pack(side="left")
-        
-        self.file_info = ttk.Label(self.file_frame, text="支持 PDF、SVG、PNG、JPG、BMP、TIFF、WebP 等格式",
-                                   foreground="gray")
-        self.file_info.pack(anchor="w", pady=(8, 0))
-    
-    def _create_scope_section(self, parent):
-        """处理范围"""
-        frame = ttk.LabelFrame(parent, text="处理范围", padding=(20, 15))
-        frame.pack(fill="x", pady=(0, 12))
-        
+        file_row.pack(fill="x")
+        ttk.Label(file_row, text="文件:", width=7).pack(side="left")
+        ttk.Entry(
+            file_row,
+            textvariable=self.file_path_var,
+            font=self.font_base,
+        ).pack(side="left", fill="x", expand=True, padx=(0, 8))
+        ttk.Button(
+            file_row,
+            text="浏览",
+            command=self._select_files,
+            style="Compact.TButton",
+        ).pack(side="left")
+        self.file_info = ttk.Label(
+            self.file_frame,
+            text="支持 PDF、SVG、PNG、JPG、BMP、TIFF、WebP",
+            style="Hint.TLabel",
+        )
+        self.file_info.pack(anchor="w", padx=(62, 0), pady=(5, 0))
+
+        ttk.Separator(frame).pack(fill="x", pady=(10, 8))
+
+        scope_row = ttk.Frame(frame)
+        scope_row.pack(fill="x")
+        ttk.Label(scope_row, text="范围:", width=7).pack(side="left")
+        self.rb_current = ttk.Radiobutton(
+            scope_row,
+            text="仅当前页",
+            variable=self.scope_var,
+            value="CURRENT",
+            command=self._on_scope_change,
+        )
+        self.rb_current.pack(side="left", padx=(0, 20))
+        ttk.Radiobutton(
+            scope_row,
+            text="全部页面",
+            variable=self.scope_var,
+            value="ALL",
+            command=self._on_scope_change,
+        ).pack(side="left")
+
+        self.page_frame = ttk.Frame(scope_row)
+        ttk.Label(self.page_frame, text="页码:").pack(side="left")
+        self.page_spin = ttk.Spinbox(
+            self.page_frame,
+            from_=1,
+            to=9999,
+            textvariable=self.page_num_var,
+            width=6,
+            font=self.font_base,
+        )
+        self.page_spin.pack(side="left", padx=(6, 0))
+        self.page_total = ttk.Label(
+            self.page_frame,
+            text="",
+            style="Hint.TLabel",
+        )
+        self.page_total.pack(side="left", padx=(6, 0))
+
+    def _create_detect_section(self, parent):
+        """常用裁剪项直接显示，少用参数默认折叠。"""
+        frame = ttk.LabelFrame(parent, text="裁剪设置", padding=(14, 10))
+        frame.pack(fill="x", pady=(0, 10))
+
         row = ttk.Frame(frame)
         row.pack(fill="x")
-        
-        self.rb_current = ttk.Radiobutton(row, text="仅当前页", variable=self.scope_var, 
-                                          value="CURRENT", command=self._on_scope_change)
-        self.rb_current.pack(side="left", padx=(0, 30))
-        
-        ttk.Radiobutton(row, text="全部页面", variable=self.scope_var, 
-                       value="ALL", command=self._on_scope_change).pack(side="left")
-        
-        # 页码输入（PDF 专用）
-        self.page_frame = ttk.Frame(frame)
-        page_row = ttk.Frame(self.page_frame)
-        page_row.pack(fill="x", pady=(12, 0))
-        
-        ttk.Label(page_row, text="指定页码:").pack(side="left")
-        self.page_spin = ttk.Spinbox(page_row, from_=1, to=9999, textvariable=self.page_num_var, 
-                                     width=8, font=self.font_base)
-        self.page_spin.pack(side="left", padx=(10, 0))
-        self.page_total = ttk.Label(page_row, text="", foreground="gray")
-        self.page_total.pack(side="left", padx=(10, 0))
-    
-    def _create_detect_section(self, parent):
-        """检测参数"""
-        frame = ttk.LabelFrame(parent, text="检测参数", padding=(20, 15))
-        frame.pack(fill="x", pady=(0, 12))
-        
-        # 模式
-        row1 = ttk.Frame(frame)
-        row1.pack(fill="x", pady=(0, 12))
-        
-        ttk.Label(row1, text="模式:").pack(side="left")
-        for text, val in [("智能", "smart"), ("简单", "simple"), ("边缘敏感", "edge")]:
-            ttk.Radiobutton(row1, text=text, variable=self.detect_mode_var, 
-                           value=val).pack(side="left", padx=(15, 0))
-        
-        # 阈值
-        row2 = ttk.Frame(frame)
-        row2.pack(fill="x", pady=(0, 12))
-        
-        ttk.Label(row2, text="白色阈值:", width=10).pack(side="left")
-        ttk.Scale(row2, from_=200, to=255, variable=self.threshold_var,
-                 orient="horizontal", length=160).pack(side="left")
-        self.threshold_label = ttk.Label(row2, text="250", width=4, font=self.font_title)
-        self.threshold_label.pack(side="left", padx=(10, 0))
-        ttk.Label(row2, text="越高=只裁纯白", foreground="#888888").pack(side="left", padx=(15, 0))
-        self.threshold_var.trace("w", lambda *_: self.threshold_label.config(
-            text=str(self.threshold_var.get())))
-        
-        # 敏感度
-        row3 = ttk.Frame(frame)
-        row3.pack(fill="x", pady=(0, 12))
-        
-        ttk.Label(row3, text="敏感度:", width=10).pack(side="left")
-        ttk.Scale(row3, from_=5, to=50, variable=self.sensitivity_var,
-                 orient="horizontal", length=160).pack(side="left")
-        self.sensitivity_label = ttk.Label(row3, text="15", width=4, font=self.font_title)
-        self.sensitivity_label.pack(side="left", padx=(10, 0))
-        ttk.Label(row3, text="越低=裁剪更多", foreground="#888888").pack(side="left", padx=(15, 0))
-        self.sensitivity_var.trace("w", lambda *_: self.sensitivity_label.config(
-            text=str(self.sensitivity_var.get())))
-        
-        # 留白
-        row4 = ttk.Frame(frame)
-        row4.pack(fill="x")
-        
-        ttk.Label(row4, text="边缘留白:", width=10).pack(side="left")
-        ttk.Entry(row4, textvariable=self.padding_var, width=8, font=self.font_base).pack(side="left")
-        ttk.Label(row4, text="px", foreground="gray").pack(side="left", padx=(5, 0))
-    
+        ttk.Label(row, text="检测:").pack(side="left")
+        self.detect_mode_combo = ttk.Combobox(
+            row,
+            textvariable=self.detect_mode_display_var,
+            values=list(DETECT_MODE_LABELS),
+            state="readonly",
+            width=10,
+            font=self.font_base,
+        )
+        self.detect_mode_combo.pack(side="left", padx=(6, 18))
+        self.detect_mode_combo.bind(
+            "<<ComboboxSelected>>",
+            lambda event: self._on_detect_mode_change(),
+        )
+
+        ttk.Label(row, text="边缘留白:").pack(side="left")
+        ttk.Entry(
+            row,
+            textvariable=self.padding_var,
+            width=6,
+            font=self.font_base,
+        ).pack(side="left", padx=(6, 4))
+        ttk.Label(row, text="px", style="Hint.TLabel").pack(side="left")
+
+        self.btn_detect_advanced = ttk.Button(
+            row,
+            text="高级参数 ▸",
+            command=self._toggle_detect_advanced,
+            style="Compact.TButton",
+        )
+        self.btn_detect_advanced.pack(side="right")
+
+        self.detect_advanced_frame = ttk.Frame(frame)
+
+        threshold_row = ttk.Frame(self.detect_advanced_frame)
+        threshold_row.pack(fill="x", pady=(0, 8))
+        threshold_row.columnconfigure(1, weight=1)
+        ttk.Label(threshold_row, text="白色阈值", width=10).grid(
+            row=0, column=0, sticky="w"
+        )
+        ttk.Scale(
+            threshold_row,
+            from_=200,
+            to=255,
+            variable=self.threshold_var,
+            orient="horizontal",
+        ).grid(row=0, column=1, sticky="ew", padx=(8, 10))
+        self.threshold_label = ttk.Label(
+            threshold_row,
+            text="250",
+            width=4,
+            font=self.font_title,
+        )
+        self.threshold_label.grid(row=0, column=2, sticky="e")
+
+        sensitivity_row = ttk.Frame(self.detect_advanced_frame)
+        sensitivity_row.pack(fill="x")
+        sensitivity_row.columnconfigure(1, weight=1)
+        ttk.Label(sensitivity_row, text="敏感度", width=10).grid(
+            row=0, column=0, sticky="w"
+        )
+        ttk.Scale(
+            sensitivity_row,
+            from_=5,
+            to=50,
+            variable=self.sensitivity_var,
+            orient="horizontal",
+        ).grid(row=0, column=1, sticky="ew", padx=(8, 10))
+        self.sensitivity_label = ttk.Label(
+            sensitivity_row,
+            text="15",
+            width=4,
+            font=self.font_title,
+        )
+        self.sensitivity_label.grid(row=0, column=2, sticky="e")
+
+        self.threshold_var.trace(
+            "w",
+            lambda *_: self.threshold_label.config(
+                text=str(self.threshold_var.get())
+            ),
+        )
+        self.sensitivity_var.trace(
+            "w",
+            lambda *_: self.sensitivity_label.config(
+                text=str(self.sensitivity_var.get())
+            ),
+        )
+
     def _create_output_section(self, parent):
-        """输出设置"""
-        frame = ttk.LabelFrame(parent, text="输出设置", padding=(20, 15))
-        frame.pack(fill="x", pady=(0, 12))
-        
-        # 格式 + DPI
-        row1 = ttk.Frame(frame)
-        row1.pack(fill="x", pady=(0, 12))
-        
-        ttk.Label(row1, text="格式:").pack(side="left")
-        self.format_combo = ttk.Combobox(row1, textvariable=self.output_format_var,
-                                         values=["PDF", "SVG", "PNG", "TIFF", "JPEG", "WebP"],
-                                         state="readonly", width=8, font=self.font_base)
-        self.format_combo.pack(side="left", padx=(10, 30))
-        self.format_combo.bind("<<ComboboxSelected>>", lambda e: self._on_format_change())
-        
-        # DPI 区域（可隐藏）
-        self.dpi_frame = ttk.Frame(row1)
-        ttk.Label(self.dpi_frame, text="DPI:").pack(side="left")
-        ttk.Entry(self.dpi_frame, textvariable=self.dpi_var, width=8, font=self.font_base).pack(side="left", padx=(10, 0))
-        
-        # 矢量提示（可隐藏）
-        self.vector_hint = ttk.Label(row1, text="矢量格式，保持原始画质", foreground="gray")
-        
-        # 输出目录
-        row2 = ttk.Frame(frame)
-        row2.pack(fill="x")
-        
-        ttk.Label(row2, text="保存到:").pack(side="left")
-        ttk.Entry(row2, textvariable=self.output_dir_var, font=self.font_base).pack(
-            side="left", fill="x", expand=True, padx=(10, 10))
-        ttk.Button(row2, text="选择", command=self._select_output_dir).pack(side="left")
-    
+        """输出格式、质量和目录使用稳定的两行布局。"""
+        frame = ttk.LabelFrame(parent, text="输出", padding=(14, 10))
+        frame.pack(fill="x", pady=(0, 10))
+
+        controls = ttk.Frame(frame)
+        controls.pack(fill="x")
+        ttk.Label(controls, text="格式:").pack(side="left")
+        self.format_combo = ttk.Combobox(
+            controls,
+            textvariable=self.output_format_var,
+            values=["PDF", "SVG", "PNG", "TIFF", "JPEG", "WebP"],
+            state="readonly",
+            width=9,
+            font=self.font_base,
+        )
+        self.format_combo.pack(side="left", padx=(6, 20))
+        self.format_combo.bind(
+            "<<ComboboxSelected>>",
+            lambda event: self._on_format_change(),
+        )
+
+        self.quality_slot = ttk.Frame(controls)
+        self.quality_slot.pack(side="left", fill="x", expand=True)
+
+        self.dpi_frame = ttk.Frame(self.quality_slot)
+        ttk.Label(self.dpi_frame, text="输出 DPI:").pack(side="left")
+        ttk.Entry(
+            self.dpi_frame,
+            textvariable=self.dpi_var,
+            width=7,
+            font=self.font_base,
+        ).pack(side="left", padx=(6, 0))
+
+        self.pdf_dpi_frame = ttk.Frame(self.quality_slot)
+        ttk.Label(self.pdf_dpi_frame, text="图片 DPI:").pack(side="left")
+        ttk.Combobox(
+            self.pdf_dpi_frame,
+            textvariable=self.pdf_image_dpi_var,
+            values=["300", "450", "600"],
+            width=7,
+            font=self.font_base,
+        ).pack(side="left", padx=(6, 0))
+
+        self.vector_hint = ttk.Label(
+            frame,
+            text="",
+            style="Hint.TLabel",
+            justify="left",
+            wraplength=640,
+        )
+        self.vector_hint.pack(fill="x", pady=(7, 0))
+
+        directory_row = ttk.Frame(frame)
+        directory_row.pack(fill="x", pady=(9, 0))
+        ttk.Label(directory_row, text="保存到:").pack(side="left")
+        ttk.Entry(
+            directory_row,
+            textvariable=self.output_dir_var,
+            font=self.font_base,
+        ).pack(side="left", fill="x", expand=True, padx=(6, 8))
+        ttk.Button(
+            directory_row,
+            text="选择",
+            command=self._select_output_dir,
+            style="Compact.TButton",
+        ).pack(side="left")
+
     def _create_action_section(self, parent):
-        """操作区"""
+        """状态、进度和唯一主操作。"""
         frame = ttk.Frame(parent)
-        frame.pack(fill="x", pady=(0, 12))
-        
-        # 状态
-        self.status_label = ttk.Label(frame, textvariable=self.status_var, foreground="#0066cc")
-        self.status_label.pack(fill="x", pady=(0, 8))
-        
-        # 进度条
-        self.progress = ttk.Progressbar(frame, variable=self.progress_var, maximum=100)
-        self.progress.pack(fill="x", pady=(0, 12))
-        
-        # 开始按钮
-        self.btn_start = ttk.Button(frame, text="开始处理", style="Big.TButton",
-                                   command=self._start_processing)
-        self.btn_start.pack(fill="x", ipady=6)
-    
+        frame.pack(fill="x", pady=(0, 8))
+
+        self.status_label = ttk.Label(
+            frame,
+            textvariable=self.status_var,
+            foreground="#0066cc",
+        )
+        self.status_label.pack(fill="x", pady=(0, 5))
+
+        self.progress = ttk.Progressbar(
+            frame,
+            variable=self.progress_var,
+            maximum=100,
+        )
+        self.progress.pack(fill="x", pady=(0, 8))
+
+        self.btn_start = ttk.Button(
+            frame,
+            text="开始处理",
+            style="Big.TButton",
+            command=self._start_processing,
+        )
+        self.btn_start.pack(fill="x")
+
     def _create_log_section(self, parent):
-        """日志区"""
-        frame = ttk.LabelFrame(parent, text="日志", padding=(10, 10))
-        frame.pack(fill="both", expand=True)
-        
-        container = ttk.Frame(frame)
+        """日志默认折叠，错误或警告时自动展开。"""
+        self.btn_log_toggle = ttk.Button(
+            parent,
+            text="处理日志 ▸",
+            command=self._toggle_main_log,
+            style="Compact.TButton",
+        )
+        self.btn_log_toggle.pack(anchor="w")
+
+        self.log_frame = ttk.LabelFrame(
+            parent,
+            text="处理日志",
+            padding=(8, 8),
+        )
+        container = ttk.Frame(self.log_frame)
         container.pack(fill="both", expand=True)
-        
-        self.log_text = tk.Text(container, height=14, font=self.font_log,
-                               bg="#fafafa", relief="flat", wrap="word",
-                               padx=10, pady=8, spacing3=4)
+
+        self.log_text = tk.Text(
+            container,
+            height=7,
+            font=self.font_log,
+            bg="#fafafa",
+            relief="flat",
+            wrap="word",
+            padx=8,
+            pady=6,
+            spacing3=3,
+        )
         self.log_text.pack(side="left", fill="both", expand=True)
-        
-        scrollbar = ttk.Scrollbar(container, orient="vertical", command=self.log_text.yview)
+
+        scrollbar = ttk.Scrollbar(
+            container,
+            orient="vertical",
+            command=self.log_text.yview,
+        )
         scrollbar.pack(side="right", fill="y")
         self.log_text.config(yscrollcommand=scrollbar.set, state="disabled")
-        
-        self.log_text.tag_configure("TIME", foreground="#999999")
-        self.log_text.tag_configure("INFO", foreground="#333333")
-        self.log_text.tag_configure("SUCCESS", foreground="#28a745")
-        self.log_text.tag_configure("WARNING", foreground="#f39c12")
-        self.log_text.tag_configure("ERROR", foreground="#dc3545")
+
+        self.log_text.tag_configure("TIME", foreground="#777777")
+        self.log_text.tag_configure("INFO", foreground="#222222")
+        self.log_text.tag_configure("SUCCESS", foreground="#16833a")
+        self.log_text.tag_configure("WARNING", foreground="#9a6700")
+        self.log_text.tag_configure("ERROR", foreground="#c62828")
 
     def _create_transparency_tab(self, parent):
-        """创建背景透明处理页"""
+        """创建背景透明处理页。"""
         self._create_transparency_source_section(parent)
         self._create_transparency_params_section(parent)
         self._create_transparency_output_section(parent)
         self._create_transparency_action_section(parent)
         self._create_transparency_log_section(parent)
 
-        self.transparent_tolerance_var.trace("w", lambda *_: self.transparent_tolerance_label_var.set(
-            str(self.transparent_tolerance_var.get())))
-        self.transparent_feather_var.trace("w", lambda *_: self.transparent_feather_label_var.set(
-            str(self.transparent_feather_var.get())))
+        self.transparent_tolerance_var.trace(
+            "w",
+            lambda *_: self.transparent_tolerance_label_var.set(
+                str(self.transparent_tolerance_var.get())
+            ),
+        )
+        self.transparent_feather_var.trace(
+            "w",
+            lambda *_: self.transparent_feather_label_var.set(
+                str(self.transparent_feather_var.get())
+            ),
+        )
+        self._on_transparent_color_mode_change()
 
     def _create_transparency_source_section(self, parent):
-        frame = ttk.LabelFrame(parent, text="来源", padding=(20, 15))
-        frame.pack(fill="x", pady=(0, 12))
+        frame = ttk.LabelFrame(parent, text="来源", padding=(14, 10))
+        frame.pack(fill="x", pady=(0, 10))
 
         row = ttk.Frame(frame)
         row.pack(fill="x")
-
         ttk.Label(row, text="文件:").pack(side="left")
-        ttk.Entry(row, textvariable=self.transparent_file_path_var, font=self.font_base).pack(
-            side="left", fill="x", expand=True, padx=(10, 10))
-        ttk.Button(row, text="浏览", command=self._select_transparent_files).pack(side="left")
+        ttk.Entry(
+            row,
+            textvariable=self.transparent_file_path_var,
+            font=self.font_base,
+        ).pack(side="left", fill="x", expand=True, padx=(6, 8))
+        ttk.Button(
+            row,
+            text="浏览",
+            command=self._select_transparent_files,
+            style="Compact.TButton",
+        ).pack(side="left")
 
-        ttk.Label(frame, textvariable=self.transparent_info_var, foreground="gray").pack(anchor="w", pady=(8, 0))
+        ttk.Label(
+            frame,
+            textvariable=self.transparent_info_var,
+            style="Hint.TLabel",
+        ).pack(anchor="w", pady=(5, 0))
 
     def _create_transparency_params_section(self, parent):
-        frame = ttk.LabelFrame(parent, text="透明参数", padding=(20, 15))
-        frame.pack(fill="x", pady=(0, 12))
+        frame = ttk.LabelFrame(parent, text="透明设置", padding=(14, 10))
+        frame.pack(fill="x", pady=(0, 10))
 
-        row1 = ttk.Frame(frame)
-        row1.pack(fill="x", pady=(0, 12))
-        ttk.Label(row1, text="目标颜色:", width=10).pack(side="left")
-        for text, val in [("四角平均", "corners"), ("左上角", "top_left"), ("自定义", "custom")]:
-            ttk.Radiobutton(row1, text=text, variable=self.transparent_color_mode_var,
-                            value=val).pack(side="left", padx=(15, 0))
-        ttk.Entry(row1, textvariable=self.transparent_custom_color_var, width=10,
-                  font=self.font_base).pack(side="left", padx=(20, 0))
+        color_row = ttk.Frame(frame)
+        color_row.pack(fill="x")
+        ttk.Label(color_row, text="目标颜色:").pack(side="left")
+        for label, value in (
+            ("四角平均", "corners"),
+            ("左上角", "top_left"),
+            ("自定义", "custom"),
+        ):
+            ttk.Radiobutton(
+                color_row,
+                text=label,
+                variable=self.transparent_color_mode_var,
+                value=value,
+                command=self._on_transparent_color_mode_change,
+            ).pack(side="left", padx=(12, 0))
+        self.transparent_custom_color_entry = ttk.Entry(
+            color_row,
+            textvariable=self.transparent_custom_color_var,
+            width=10,
+            font=self.font_base,
+        )
 
-        row2 = ttk.Frame(frame)
-        row2.pack(fill="x", pady=(0, 12))
-        ttk.Label(row2, text="容差:", width=10).pack(side="left")
-        ttk.Scale(row2, from_=0, to=100, variable=self.transparent_tolerance_var,
-                  orient="horizontal", length=160).pack(side="left")
-        ttk.Label(row2, textvariable=self.transparent_tolerance_label_var,
-                  width=4, font=self.font_title).pack(side="left", padx=(10, 0))
-        ttk.Label(row2, text="越高=去除更多相近颜色", foreground="#888888").pack(side="left", padx=(15, 0))
+        option_row = ttk.Frame(frame)
+        option_row.pack(fill="x", pady=(8, 0))
+        ttk.Checkbutton(
+            option_row,
+            text="只处理连接到图片边缘的背景",
+            variable=self.transparent_edge_only_var,
+        ).pack(side="left")
+        self.btn_transparent_advanced = ttk.Button(
+            option_row,
+            text="高级参数 ▸",
+            command=self._toggle_transparency_advanced,
+            style="Compact.TButton",
+        )
+        self.btn_transparent_advanced.pack(side="right")
 
-        row3 = ttk.Frame(frame)
-        row3.pack(fill="x", pady=(0, 12))
-        ttk.Label(row3, text="边缘羽化:", width=10).pack(side="left")
-        ttk.Scale(row3, from_=0, to=8, variable=self.transparent_feather_var,
-                  orient="horizontal", length=160).pack(side="left")
-        ttk.Label(row3, textvariable=self.transparent_feather_label_var,
-                  width=4, font=self.font_title).pack(side="left", padx=(10, 0))
-        ttk.Label(row3, text="px", foreground="gray").pack(side="left", padx=(5, 0))
+        self.transparent_advanced_frame = ttk.Frame(frame)
 
-        row4 = ttk.Frame(frame)
-        row4.pack(fill="x")
-        ttk.Checkbutton(row4, text="只处理连到图片边缘的背景",
-                        variable=self.transparent_edge_only_var).pack(side="left")
+        tolerance_row = ttk.Frame(self.transparent_advanced_frame)
+        tolerance_row.pack(fill="x", pady=(0, 8))
+        tolerance_row.columnconfigure(1, weight=1)
+        ttk.Label(tolerance_row, text="颜色容差", width=10).grid(
+            row=0, column=0, sticky="w"
+        )
+        ttk.Scale(
+            tolerance_row,
+            from_=0,
+            to=100,
+            variable=self.transparent_tolerance_var,
+            orient="horizontal",
+        ).grid(row=0, column=1, sticky="ew", padx=(8, 10))
+        ttk.Label(
+            tolerance_row,
+            textvariable=self.transparent_tolerance_label_var,
+            width=4,
+            font=self.font_title,
+        ).grid(row=0, column=2, sticky="e")
+
+        feather_row = ttk.Frame(self.transparent_advanced_frame)
+        feather_row.pack(fill="x")
+        feather_row.columnconfigure(1, weight=1)
+        ttk.Label(feather_row, text="边缘羽化", width=10).grid(
+            row=0, column=0, sticky="w"
+        )
+        ttk.Scale(
+            feather_row,
+            from_=0,
+            to=8,
+            variable=self.transparent_feather_var,
+            orient="horizontal",
+        ).grid(row=0, column=1, sticky="ew", padx=(8, 10))
+        ttk.Label(
+            feather_row,
+            textvariable=self.transparent_feather_label_var,
+            width=4,
+            font=self.font_title,
+        ).grid(row=0, column=2, sticky="e")
 
     def _create_transparency_output_section(self, parent):
-        frame = ttk.LabelFrame(parent, text="输出设置", padding=(20, 15))
-        frame.pack(fill="x", pady=(0, 12))
+        frame = ttk.LabelFrame(parent, text="输出", padding=(14, 10))
+        frame.pack(fill="x", pady=(0, 10))
 
-        row1 = ttk.Frame(frame)
-        row1.pack(fill="x", pady=(0, 12))
-        ttk.Label(row1, text="格式:").pack(side="left")
-        ttk.Combobox(row1, textvariable=self.transparent_format_var,
-                     values=["PNG", "WebP"], state="readonly",
-                     width=8, font=self.font_base).pack(side="left", padx=(10, 0))
+        format_row = ttk.Frame(frame)
+        format_row.pack(fill="x")
+        ttk.Label(format_row, text="格式:").pack(side="left")
+        ttk.Combobox(
+            format_row,
+            textvariable=self.transparent_format_var,
+            values=["PNG", "WebP"],
+            state="readonly",
+            width=9,
+            font=self.font_base,
+        ).pack(side="left", padx=(6, 0))
+        ttk.Label(
+            format_row,
+            text="保留透明通道和原始像素尺寸",
+            style="Hint.TLabel",
+        ).pack(side="left", padx=(14, 0))
 
-        row2 = ttk.Frame(frame)
-        row2.pack(fill="x")
-        ttk.Label(row2, text="保存到:").pack(side="left")
-        ttk.Entry(row2, textvariable=self.transparent_output_dir_var, font=self.font_base).pack(
-            side="left", fill="x", expand=True, padx=(10, 10))
-        ttk.Button(row2, text="选择", command=self._select_transparent_output_dir).pack(side="left")
+        directory_row = ttk.Frame(frame)
+        directory_row.pack(fill="x", pady=(9, 0))
+        ttk.Label(directory_row, text="保存到:").pack(side="left")
+        ttk.Entry(
+            directory_row,
+            textvariable=self.transparent_output_dir_var,
+            font=self.font_base,
+        ).pack(side="left", fill="x", expand=True, padx=(6, 8))
+        ttk.Button(
+            directory_row,
+            text="选择",
+            command=self._select_transparent_output_dir,
+            style="Compact.TButton",
+        ).pack(side="left")
 
     def _create_transparency_action_section(self, parent):
         frame = ttk.Frame(parent)
-        frame.pack(fill="x", pady=(0, 12))
+        frame.pack(fill="x", pady=(0, 8))
 
-        ttk.Label(frame, textvariable=self.transparent_status_var,
-                  foreground="#0066cc").pack(fill="x", pady=(0, 8))
-        ttk.Progressbar(frame, variable=self.transparent_progress_var,
-                        maximum=100).pack(fill="x", pady=(0, 12))
+        ttk.Label(
+            frame,
+            textvariable=self.transparent_status_var,
+            foreground="#0066cc",
+        ).pack(fill="x", pady=(0, 5))
+        ttk.Progressbar(
+            frame,
+            variable=self.transparent_progress_var,
+            maximum=100,
+        ).pack(fill="x", pady=(0, 8))
         self.btn_transparent_start = ttk.Button(
-            frame, text="开始处理透明背景", style="Big.TButton",
-            command=self._start_transparency_processing)
-        self.btn_transparent_start.pack(fill="x", ipady=6)
+            frame,
+            text="开始处理透明背景",
+            style="Big.TButton",
+            command=self._start_transparency_processing,
+        )
+        self.btn_transparent_start.pack(fill="x")
 
     def _create_transparency_log_section(self, parent):
-        frame = ttk.LabelFrame(parent, text="日志", padding=(10, 10))
-        frame.pack(fill="both", expand=True)
+        self.btn_transparent_log_toggle = ttk.Button(
+            parent,
+            text="处理日志 ▸",
+            command=self._toggle_transparent_log,
+            style="Compact.TButton",
+        )
+        self.btn_transparent_log_toggle.pack(anchor="w")
 
-        container = ttk.Frame(frame)
+        self.transparent_log_frame = ttk.LabelFrame(
+            parent,
+            text="处理日志",
+            padding=(8, 8),
+        )
+        container = ttk.Frame(self.transparent_log_frame)
         container.pack(fill="both", expand=True)
 
-        self.transparent_log_text = tk.Text(container, height=14, font=self.font_log,
-                                            bg="#fafafa", relief="flat", wrap="word",
-                                            padx=10, pady=8, spacing3=4)
-        self.transparent_log_text.pack(side="left", fill="both", expand=True)
+        self.transparent_log_text = tk.Text(
+            container,
+            height=7,
+            font=self.font_log,
+            bg="#fafafa",
+            relief="flat",
+            wrap="word",
+            padx=8,
+            pady=6,
+            spacing3=3,
+        )
+        self.transparent_log_text.pack(
+            side="left",
+            fill="both",
+            expand=True,
+        )
 
-        scrollbar = ttk.Scrollbar(container, orient="vertical", command=self.transparent_log_text.yview)
+        scrollbar = ttk.Scrollbar(
+            container,
+            orient="vertical",
+            command=self.transparent_log_text.yview,
+        )
         scrollbar.pack(side="right", fill="y")
-        self.transparent_log_text.config(yscrollcommand=scrollbar.set, state="disabled")
+        self.transparent_log_text.config(
+            yscrollcommand=scrollbar.set,
+            state="disabled",
+        )
 
-        self.transparent_log_text.tag_configure("TIME", foreground="#999999")
-        self.transparent_log_text.tag_configure("INFO", foreground="#333333")
-        self.transparent_log_text.tag_configure("SUCCESS", foreground="#28a745")
-        self.transparent_log_text.tag_configure("WARNING", foreground="#f39c12")
-        self.transparent_log_text.tag_configure("ERROR", foreground="#dc3545")
-    
+        self.transparent_log_text.tag_configure(
+            "TIME", foreground="#777777"
+        )
+        self.transparent_log_text.tag_configure(
+            "INFO", foreground="#222222"
+        )
+        self.transparent_log_text.tag_configure(
+            "SUCCESS", foreground="#16833a"
+        )
+        self.transparent_log_text.tag_configure(
+            "WARNING", foreground="#9a6700"
+        )
+        self.transparent_log_text.tag_configure(
+            "ERROR", foreground="#c62828"
+        )
+
     # ========== 延迟检查 ==========
     
     def _deferred_pymupdf_check(self):
@@ -435,52 +748,129 @@ class CropperApp(ttk.Frame):
     # ========== 事件处理 ==========
     
     def _on_mode_change(self):
-        """模式切换"""
+        """模式切换。"""
         mode = self.mode_var.get()
-        
-        self.ppt_frame.pack_forget()
-        self.file_frame.pack_forget()
+
+        self.ppt_frame.grid_remove()
+        self.file_frame.grid_remove()
         self.page_frame.pack_forget()
-        
+
         if mode == "PPT":
-            self.ppt_frame.pack(fill="x")
+            self.ppt_frame.grid(row=0, column=0, sticky="ew")
             self.rb_current.config(text="仅当前幻灯片")
         else:
-            self.file_frame.pack(fill="x")
+            self.file_frame.grid(row=0, column=0, sticky="ew")
             self.rb_current.config(text="仅指定页码")
-    
+
+        self._on_scope_change()
+        self._on_format_change()
+
     def _on_scope_change(self):
-        """范围切换"""
-        scope = self.scope_var.get()
-        
-        if scope == "ALL":
-            self.page_frame.pack_forget()
+        """范围切换。"""
+        self.page_frame.pack_forget()
+        if self.scope_var.get() == "ALL":
             self.page_spin.config(state="disabled")
+            return
+
+        self.page_spin.config(state="normal")
+        if self.mode_var.get() == "FILE" and self.source_files:
+            from controllers import FileController
+
+            if FileController.is_pdf(self.source_files[0]):
+                self.page_frame.pack(side="left", padx=(20, 0))
+
+    def _on_detect_mode_change(self):
+        self.detect_mode_var.set(
+            DETECT_MODE_LABELS.get(
+                self.detect_mode_display_var.get(),
+                "smart",
+            )
+        )
+
+    def _toggle_detect_advanced(self):
+        self.detect_advanced_visible = not self.detect_advanced_visible
+        if self.detect_advanced_visible:
+            self.detect_advanced_frame.pack(fill="x", pady=(10, 0))
+            self.btn_detect_advanced.config(text="高级参数 ▾")
         else:
-            if self.mode_var.get() == "FILE" and self.source_files:
-                from controllers import FileController
-                first = self.source_files[0]
-                if FileController.is_pdf(first):
-                    self.page_frame.pack(fill="x")
-            self.page_spin.config(state="normal")
-    
+            self.detect_advanced_frame.pack_forget()
+            self.btn_detect_advanced.config(text="高级参数 ▸")
+
+    def _current_source_kind(self):
+        if self.mode_var.get() == "PPT":
+            return "ppt"
+        if not self.source_files:
+            return "unknown"
+
+        from controllers import FileController
+
+        first = self.source_files[0]
+        if FileController.is_pdf(first) or FileController.is_svg(first):
+            return "document"
+        return "raster"
+
     def _on_format_change(self):
-        """输出格式切换"""
-        fmt = self.output_format_var.get()
-        
-        if fmt in ("PDF", "SVG"):
-            # 矢量格式，隐藏 DPI，显示提示
-            self.dpi_frame.pack_forget()
-            self.vector_hint.pack(side="left")
-        else:
-            # 位图格式，显示 DPI，隐藏提示
-            self.vector_hint.pack_forget()
+        """按来源和格式只显示真正有效的质量选项。"""
+        self.dpi_frame.pack_forget()
+        self.pdf_dpi_frame.pack_forget()
+
+        quality, hint = get_output_quality_policy(
+            self.mode_var.get(),
+            self._current_source_kind(),
+            self.output_format_var.get(),
+        )
+        if quality == "dpi":
             self.dpi_frame.pack(side="left")
-    
+        elif quality == "pdf_image_dpi":
+            self.pdf_dpi_frame.pack(side="left")
+        self.vector_hint.config(text=hint)
+
+    def _on_transparent_color_mode_change(self):
+        self.transparent_custom_color_entry.pack_forget()
+        if self.transparent_color_mode_var.get() == "custom":
+            self.transparent_custom_color_entry.pack(
+                side="left",
+                padx=(12, 0),
+            )
+
+    def _toggle_transparency_advanced(self):
+        self.transparent_advanced_visible = (
+            not self.transparent_advanced_visible
+        )
+        if self.transparent_advanced_visible:
+            self.transparent_advanced_frame.pack(fill="x", pady=(10, 0))
+            self.btn_transparent_advanced.config(text="高级参数 ▾")
+        else:
+            self.transparent_advanced_frame.pack_forget()
+            self.btn_transparent_advanced.config(text="高级参数 ▸")
+
+    def _toggle_main_log(self):
+        self.main_log_visible = not self.main_log_visible
+        if self.main_log_visible:
+            self.log_frame.pack(fill="both", expand=True, pady=(8, 0))
+            self.btn_log_toggle.config(text="处理日志 ▾")
+        else:
+            self.log_frame.pack_forget()
+            self.btn_log_toggle.config(text="处理日志 ▸")
+
+    def _toggle_transparent_log(self):
+        self.transparent_log_visible = not self.transparent_log_visible
+        if self.transparent_log_visible:
+            self.transparent_log_frame.pack(
+                fill="both",
+                expand=True,
+                pady=(8, 0),
+            )
+            self.btn_transparent_log_toggle.config(text="处理日志 ▾")
+        else:
+            self.transparent_log_frame.pack_forget()
+            self.btn_transparent_log_toggle.config(text="处理日志 ▸")
+
     def _check_ppt(self):
         """检测 PPT 连接"""
         from controllers import get_ppt_controller
-        
+
+        controller = None
         try:
             controller = get_ppt_controller()
             if controller.check_connection():
@@ -494,6 +884,9 @@ class CropperApp(ttk.Frame):
         except Exception as e:
             self.ppt_status.config(text="连接失败", foreground="red")
             self.log(f"连接失败: {e}", "ERROR")
+        finally:
+            if controller is not None:
+                controller.close()
     
     def _select_files(self):
         """选择文件"""
@@ -527,7 +920,6 @@ class CropperApp(ttk.Frame):
                         self.total_pages_var.set(count)
                         self.page_spin.config(to=count)
                         self.page_total.config(text=f"(共 {count} 页)")
-                        self.page_frame.pack(fill="x")
                         self.file_info.config(text=f"PDF 文件，共 {count} 页")
                     except:
                         pass
@@ -541,6 +933,9 @@ class CropperApp(ttk.Frame):
                 self.file_path_var.set(f"[已选择 {len(paths)} 个文件]")
                 self.page_frame.pack_forget()
                 self.file_info.config(text=f"已选择 {len(paths)} 个文件，将批量处理")
+
+            self._on_scope_change()
+            self._on_format_change()
     
     def _select_output_dir(self):
         """选择输出目录"""
@@ -577,6 +972,9 @@ class CropperApp(ttk.Frame):
     def log(self, message, level="INFO"):
         """记录日志"""
         import datetime
+
+        if level in ("WARNING", "ERROR") and not self.main_log_visible:
+            self._toggle_main_log()
         ts = datetime.datetime.now().strftime("%H:%M:%S")
         
         self.log_text.config(state="normal")
@@ -588,6 +986,9 @@ class CropperApp(ttk.Frame):
     def transparent_log(self, message, level="INFO"):
         """记录透明背景日志"""
         import datetime
+
+        if level in ("WARNING", "ERROR") and not self.transparent_log_visible:
+            self._toggle_transparent_log()
         ts = datetime.datetime.now().strftime("%H:%M:%S")
 
         self.transparent_log_text.config(state="normal")
@@ -663,6 +1064,13 @@ class CropperApp(ttk.Frame):
             except:
                 dpi = 300
             
+            try:
+                pdf_image_dpi = int(self.pdf_image_dpi_var.get())
+                if pdf_image_dpi <= 0:
+                    raise ValueError
+            except:
+                pdf_image_dpi = 300
+
             config = {
                 "scope": self.scope_var.get(),
                 "output_format": self.output_format_var.get(),
@@ -672,6 +1080,7 @@ class CropperApp(ttk.Frame):
                 "sensitivity": self.sensitivity_var.get(),
                 "padding": padding,
                 "dpi": dpi,
+                "pdf_image_dpi": pdf_image_dpi,
                 "page_num": self.page_num_var.get(),
                 "source_files": self.source_files,
             }

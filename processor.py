@@ -6,6 +6,9 @@
 import os
 import re
 import tempfile
+import time
+
+from units import pixels_to_points, points_to_pixels
 
 
 class CropProcessor:
@@ -22,29 +25,52 @@ class CropProcessor:
     
     def set_progress(self, val):
         self.callback(None, None, val)
+
+    def _cleanup_temp_file(self, path):
+        """清理可能仍被 PowerPoint 短暂占用的临时文件"""
+        for attempt in range(5):
+            if not os.path.exists(path):
+                return
+            try:
+                os.remove(path)
+                return
+            except PermissionError:
+                if attempt < 4:
+                    time.sleep(0.1 * (attempt + 1))
+
+        self.log(f"临时文件仍被占用，稍后可手动删除: {path}", "WARNING")
     
     def process_ppt(self, config):
         """处理 PPT"""
         from controllers import get_ppt_controller
         controller = get_ppt_controller()
-        
-        if not controller.check_connection():
-            self.log("未找到运行中的 PPT", "ERROR")
-            return None
-        
-        current_index, ppt_name, src_path = controller.get_info()
-        total_pages = controller.get_slide_count() if config["scope"] == "ALL" else 1
-        
-        self.log(f"已连接: {ppt_name} (第 {current_index} 页)")
-        
-        output_dir = config.get("output_dir") or os.path.dirname(src_path) or os.path.expanduser("~/Desktop")
-        base_name = self._safe_name(os.path.splitext(ppt_name)[0])
-        out_fmt = config["output_format"]
-        
-        if out_fmt in ["PDF", "SVG"]:
-            return self._process_ppt_vector(controller, config, current_index, output_dir, base_name, total_pages)
-        else:
-            return self._process_ppt_raster(controller, config, current_index, output_dir, base_name, total_pages)
+
+        try:
+            if not controller.check_connection():
+                self.log("未找到运行中的 PPT", "ERROR")
+                return None
+
+            current_index, ppt_name, src_path = controller.get_info()
+            total_pages = controller.get_slide_count() if config["scope"] == "ALL" else 1
+
+            self.log(f"已连接: {ppt_name} (第 {current_index} 页)")
+
+            source_dir = ""
+            if src_path and not re.match(r"^https?://", src_path, re.IGNORECASE):
+                source_dir = os.path.dirname(src_path)
+            output_dir = config.get("output_dir") or source_dir or os.path.expanduser("~/Desktop")
+            if not config.get("output_dir") and not source_dir and src_path:
+                self.log("PPT 位于云端，输出目录已改为本机桌面", "WARNING")
+
+            base_name = self._safe_name(os.path.splitext(ppt_name)[0])
+            out_fmt = config["output_format"]
+
+            if out_fmt in ["PDF", "SVG"]:
+                return self._process_ppt_vector(controller, config, current_index, output_dir, base_name, total_pages)
+            else:
+                return self._process_ppt_raster(controller, config, current_index, output_dir, base_name, total_pages)
+        finally:
+            controller.close()
     
     def _process_ppt_vector(self, controller, config, current_index, output_dir, base_name, total_pages):
         """PPT 矢量输出"""
@@ -54,24 +80,82 @@ class CropProcessor:
         threshold = config["threshold"]
         sensitivity = config["sensitivity"]
         detect_mode = config["detect_mode"]
+        try:
+            pdf_image_dpi = max(1, int(config.get("pdf_image_dpi", 300)))
+        except (TypeError, ValueError):
+            pdf_image_dpi = 300
         
         temp_pdf = self._make_temp_path(".pdf")
+        temp_pptx = self._make_temp_path(".pptx")
+        vector_doc = None
         
         try:
             self.set_status("导出 PDF...")
-            controller.export_temp_pdf(temp_pdf, scope=scope, index=current_index)
+            controller.export_temp_pdf(
+                temp_pdf,
+                scope=scope,
+                index=current_index,
+            )
+
+            vector_source = temp_pdf
+            try:
+                import pymupdf
+                from ppt_image_restore import (
+                    restore_pptx_images_in_document,
+                )
+
+                self.set_status("恢复 PPT 原始图片...")
+                self._cleanup_temp_file(temp_pptx)
+                controller.export_source_copy(temp_pptx)
+                vector_doc = pymupdf.open(temp_pdf)
+                restored = restore_pptx_images_in_document(
+                    vector_doc,
+                    temp_pptx,
+                    max_image_dpi=pdf_image_dpi,
+                )
+                vector_source = vector_doc
+                if restored:
+                    self.log(
+                        f"已优化 {len(restored)} 个 PDF 位图，"
+                        f"最高约 {pdf_image_dpi} DPI"
+                    )
+            except Exception as e:
+                if vector_doc is not None:
+                    vector_doc.close()
+                    vector_doc = None
+                self.log(
+                    "未能恢复 PPT 原始位图，将保留 PowerPoint "
+                    f"导出结果: {e}",
+                    "WARNING",
+                )
             
             if scope == "ALL":
-                final_path = os.path.join(output_dir, f"{base_name}_Cropped.{out_fmt.lower()}")
+                final_path = os.path.join(
+                    output_dir,
+                    f"{base_name}_Cropped.{out_fmt.lower()}",
+                )
             else:
-                final_path = os.path.join(output_dir, f"{base_name}_p{current_index}.{out_fmt.lower()}")
+                final_path = os.path.join(
+                    output_dir,
+                    f"{base_name}_p{current_index}.{out_fmt.lower()}",
+                )
             
             return self._process_vector_crop(
-                temp_pdf, out_fmt, final_path, padding, threshold, sensitivity, detect_mode, base_name
+                vector_source,
+                out_fmt,
+                final_path,
+                padding,
+                threshold,
+                sensitivity,
+                detect_mode,
+                base_name,
+                pdf_garbage=4,
             )
         finally:
-            if os.path.exists(temp_pdf):
-                os.remove(temp_pdf)
+            if vector_doc is not None:
+                vector_doc.close()
+            self._cleanup_temp_file(temp_pdf)
+            self._cleanup_temp_file(temp_pptx)
     
     def _process_ppt_raster(self, controller, config, current_index, output_dir, base_name, total_pages):
         """PPT 光栅输出"""
@@ -84,7 +168,7 @@ class CropProcessor:
         dpi = config.get("dpi", 300)
         
         ppt_w, ppt_h = controller.get_page_setup()
-        target_width = int((ppt_w / 72.0) * dpi)
+        target_width = int(points_to_pixels(ppt_w, dpi))
         
         pages = range(1, total_pages + 1) if scope == "ALL" else [current_index]
         
@@ -133,12 +217,14 @@ class CropProcessor:
             self.log("未选择文件", "ERROR")
             return None
         
-        first_path = paths[0]
-        
-        if FileController.is_pdf(first_path):
-            return self._process_pdf(config, first_path)
-        else:
-            return self._process_images(config, paths)
+        pdf_paths = [path for path in paths if FileController.is_pdf(path)]
+        if pdf_paths:
+            if len(paths) > 1:
+                self.log("PDF 文件需单独处理，请一次只选择一个 PDF", "ERROR")
+                return None
+            return self._process_pdf(config, pdf_paths[0])
+
+        return self._process_images(config, paths)
     
     def _process_pdf(self, config, pdf_path):
         """处理 PDF"""
@@ -166,27 +252,17 @@ class CropProcessor:
         dpi = config.get("dpi", 300)
         
         if out_fmt in ["PDF", "SVG"]:
-            temp_pdf = self._make_temp_path(".pdf")
-            try:
-                doc = pymupdf.open(pdf_path)
-                try:
-                    if scope != "ALL":
-                        doc.select([page_num - 1])
-                    doc.save(temp_pdf)
-                finally:
-                    doc.close()
-                
-                if scope == "ALL":
-                    final_path = os.path.join(output_dir, f"{base_name}_Cropped.{out_fmt.lower()}")
-                else:
-                    final_path = os.path.join(output_dir, f"{base_name}_p{page_num}.{out_fmt.lower()}")
-                
-                return self._process_vector_crop(
-                    temp_pdf, out_fmt, final_path, padding, threshold, sensitivity, detect_mode, base_name
-                )
-            finally:
-                if os.path.exists(temp_pdf):
-                    os.remove(temp_pdf)
+            if scope == "ALL":
+                final_path = os.path.join(output_dir, f"{base_name}_Cropped.{out_fmt.lower()}")
+                page_indices = None
+            else:
+                final_path = os.path.join(output_dir, f"{base_name}_p{page_num}.{out_fmt.lower()}")
+                page_indices = [page_num - 1]
+
+            return self._process_vector_crop(
+                pdf_path, out_fmt, final_path, padding, threshold, sensitivity,
+                detect_mode, base_name, page_indices=page_indices
+            )
         else:
             pages = range(1, total_pages + 1) if scope == "ALL" else [page_num]
             
@@ -245,7 +321,7 @@ class CropProcessor:
                         results.append(result)
                     continue
 
-                out_fmt = "PNG" if requested_fmt == "PDF" else requested_fmt
+                out_fmt = requested_fmt
                 img = controller.load_image(path)
                 original_dpi = img.info.get('dpi', (300, 300))
                 if isinstance(original_dpi, tuple):
@@ -383,37 +459,62 @@ class CropProcessor:
         )
         return img.crop(crop_box)
     
-    def _process_vector_crop(self, source_pdf, out_fmt, final_path, padding, threshold, sensitivity, detect_mode, base_name):
+    def _process_vector_crop(
+        self, source_pdf, out_fmt, final_path, padding, threshold,
+        sensitivity, detect_mode, base_name, page_indices=None,
+        pdf_garbage=3,
+    ):
         """矢量裁剪"""
         import pymupdf
         from PIL import Image
-        from detector import get_bbox
+        from detector import MAX_DETECTION_SIZE, get_bbox
         
-        doc = pymupdf.open(source_pdf)
+        owns_document = not isinstance(source_pdf, pymupdf.Document)
+        doc = pymupdf.open(source_pdf) if owns_document else source_pdf
         try:
+            if page_indices is not None:
+                doc.select(page_indices)
             total = len(doc)
         
             for i, page in enumerate(doc):
                 self.set_status(f"分析第 {i+1}/{total} 页...")
                 self.set_progress((i + 1) / total * 100)
             
-                pix = page.get_pixmap(matrix=pymupdf.Matrix(2, 2), alpha=False)
+                page_max_size = max(page.rect.width, page.rect.height)
+                scale = min(2.0, MAX_DETECTION_SIZE / page_max_size) if page_max_size else 1.0
+                pix = page.get_pixmap(
+                    matrix=pymupdf.Matrix(scale, scale), alpha=False
+                )
                 img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
                 bbox = get_bbox(img, threshold, sensitivity, detect_mode)
             
                 if bbox:
-                    scale = 2.0
-                    page.set_cropbox(pymupdf.Rect(
-                        max(0, bbox[0] - padding * scale) / scale,
-                        max(0, bbox[1] - padding * scale) / scale,
-                        min(pix.width, bbox[2] + padding * scale) / scale,
-                        min(pix.height, bbox[3] + padding * scale) / scale
-                    ))
+                    current_cropbox = page.cropbox
+                    detected = pymupdf.Rect(
+                        max(0, bbox[0] / scale - padding),
+                        max(0, bbox[1] / scale - padding),
+                        min(pix.width / scale, bbox[2] / scale + padding),
+                        min(pix.height / scale, bbox[3] / scale + padding),
+                    )
+                    detected = detected * page.derotation_matrix
+                    detected = pymupdf.Rect(
+                        detected.x0 + current_cropbox.x0,
+                        detected.y0 + current_cropbox.y0,
+                        detected.x1 + current_cropbox.x0,
+                        detected.y1 + current_cropbox.y0,
+                    )
+                    detected &= current_cropbox
+                    if not detected.is_empty:
+                        page.set_cropbox(detected)
 
             self.set_status("保存中...")
 
             if out_fmt == "PDF":
-                doc.save(final_path, garbage=4, deflate=True)
+                doc.save(
+                    final_path,
+                    garbage=pdf_garbage,
+                    deflate=True,
+                )
                 self.log(f"PDF 已保存: {final_path}", "SUCCESS")
                 result_path = final_path
             elif out_fmt == "SVG":
@@ -435,10 +536,14 @@ class CropProcessor:
         
             return result_path
         finally:
-            doc.close()
+            if owns_document:
+                doc.close()
     
     def _save_image(self, img, path, fmt, dpi):
         """保存图片"""
+        if fmt.upper() == "PDF":
+            self._save_raster_as_pdf(img, path, dpi)
+            return
         if fmt.upper() == "SVG":
             self._save_raster_as_svg(img, path, dpi)
             return
@@ -466,6 +571,33 @@ class CropProcessor:
         else:
             img.save(path, "PNG", dpi=(dpi, dpi), optimize=True)
     
+    def _save_raster_as_pdf(self, img, path, dpi):
+        """将裁剪后的原始像素无重采样嵌入 PDF。"""
+        import io
+
+        import pymupdf
+
+        try:
+            width_pt = pixels_to_points(img.width, dpi)
+            height_pt = pixels_to_points(img.height, dpi)
+        except (TypeError, ValueError):
+            width_pt = pixels_to_points(img.width, 300)
+            height_pt = pixels_to_points(img.height, 300)
+
+        if img.mode not in ("RGB", "RGBA"):
+            img = img.convert("RGBA")
+
+        buffer = io.BytesIO()
+        img.save(buffer, "PNG", compress_level=1)
+
+        doc = pymupdf.open()
+        try:
+            page = doc.new_page(width=width_pt, height=height_pt)
+            page.insert_image(page.rect, stream=buffer.getvalue())
+            doc.save(path, garbage=3, deflate=True)
+        finally:
+            doc.close()
+
     def _save_raster_as_svg(self, img, path, dpi):
         """将位图裁剪结果嵌入 SVG 输出"""
         import base64

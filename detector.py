@@ -1,8 +1,10 @@
 # -*- coding: utf-8 -*-
 """
-白边检测算法模块 v0.3
+白边检测算法模块 v0.4
 提供三种检测模式：smart(智能), simple(简单), edge(边缘敏感)
 """
+
+MAX_DETECTION_SIZE = 1200
 
 
 class WhiteBorderDetector:
@@ -23,7 +25,7 @@ class WhiteBorderDetector:
         
         # 大图缩放检测
         scale = 1.0
-        max_size = 1200
+        max_size = MAX_DETECTION_SIZE
         
         if pil_img.width > max_size or pil_img.height > max_size:
             scale = max_size / max(pil_img.width, pil_img.height)
@@ -78,15 +80,14 @@ class WhiteBorderDetector:
     
     def _detect_simple(self, img_array):
         """简单模式：仅亮度检测"""
-        # 使用整数运算更快
-        gray = img_array.mean(axis=2)
+        gray = img_array.sum(axis=2, dtype="uint16") // 3
         return gray < self.threshold
     
     def _detect_edge(self, img_array):
         """边缘敏感模式"""
         import numpy as np
         
-        gray = img_array.mean(axis=2).astype(np.int16)
+        gray = (img_array.sum(axis=2, dtype=np.uint16) // 3).astype(np.int16)
         
         # 梯度检测 (使用切片避免创建新数组)
         grad_x = np.abs(gray[:, 1:] - gray[:, :-1])
@@ -117,16 +118,16 @@ class WhiteBorderDetector:
         """智能模式：综合检测"""
         import numpy as np
         
-        # 一次性计算灰度
-        gray = img_array.mean(axis=2).astype(np.int16)
+        # 一次转换同时用于灰度、颜色和边缘检测，避免 float64 中间数组
+        r = img_array[:, :, 0].astype(np.int16)
+        g = img_array[:, :, 1].astype(np.int16)
+        b = img_array[:, :, 2].astype(np.int16)
+        gray = (r + g + b) // 3
         
         # 1. 亮度检测
         brightness_mask = gray < self.threshold
         
         # 2. 颜色变化检测
-        r = img_array[:, :, 0].astype(np.int16)
-        g = img_array[:, :, 1].astype(np.int16)
-        b = img_array[:, :, 2].astype(np.int16)
         
         # 使用 abs 差值代替多次 maximum
         rg = np.abs(r - g)

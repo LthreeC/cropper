@@ -1,4 +1,4 @@
-# 白边裁剪工具 v0.3
+# 白边裁剪工具 v0.4
 
 一款本地运行的批量图片处理工具，主打两件事：
 
@@ -33,6 +33,12 @@ pip install -r requirement.txt
 python main.py
 ```
 
+Windows 下如果项目中已有 `venv_clean`，请明确使用该环境启动，避免 MSYS/Git Bash 的 Python 缺少 `pywin32`：
+
+```powershell
+.\venv_clean\Scripts\python.exe .\main.py
+```
+
 打包 Windows exe：
 
 ```powershell
@@ -42,10 +48,10 @@ python main.py
 打包结果：
 
 ```text
-dist/cropper-v0.3.exe
+dist/cropper-v0.4.exe
 ```
 
-如果要覆盖已有 exe，请先关闭正在运行的 `cropper-v0.3.exe`。
+如果要覆盖已有 exe，请先关闭正在运行的 `cropper-v0.4.exe`。
 
 ## 界面说明
 
@@ -66,8 +72,8 @@ dist/cropper-v0.3.exe
 
 | 格式 | 说明 |
 |------|------|
-| PDF | 矢量输出，适合文档和打印 |
-| SVG | 矢量输出，适合网页、设计软件和后续编辑 |
+| PDF | PPT/PDF/SVG 保留矢量；图片按原始像素嵌入，不重新采样 |
+| SVG | 文档来源保留矢量；图片来源嵌入原始像素 |
 | PNG | 无损位图，支持透明 |
 | TIFF | 无损位图，适合印刷或归档 |
 | JPEG | 有损压缩，适合照片和分享 |
@@ -83,7 +89,8 @@ dist/cropper-v0.3.exe
 | 白色阈值 | 越高越只裁纯白，越低越容易裁掉浅灰 |
 | 敏感度 | 越高越保守，越低裁剪越激进 |
 | 边缘留白 | 裁剪后额外保留的像素边距 |
-| DPI | 仅影响 PNG/TIFF/JPEG/WebP 等位图输出 |
+| 输出 DPI | 仅在 PPT/PDF/SVG 渲染为位图时生效，默认 300 DPI |
+| 图片 DPI | PPT 导出 PDF/SVG 时限制内嵌位图的最高 DPI，默认 300；文字和形状仍为矢量 |
 
 ### 背景透明
 
@@ -145,8 +152,11 @@ dist/cropper-v0.3.exe
 
 - JPEG 不支持透明背景，透明处理请输出 PNG 或 WebP
 - SVG 输入可用于裁剪和透明处理，但复杂 SVG 的渲染效果取决于 PyMuPDF
-- PDF/SVG 矢量输出不受 DPI 影响，位图输出才受 DPI 影响
+- PPT 导出 PDF/SVG 时保留文字和形状矢量；嵌入位图 DPI 可在界面中选择 300/450/600 或自行输入，默认 300
+- PDF/SVG 矢量去白边只修改页面 CropBox，不会重采样文字、矢量图或源 PDF 位图；DPI 仅影响位图输出
+- PDF/PPT 页面尺寸使用 point，规范固定为 1 英寸 = 72 point；程序会结合每张图片的显示变换和所选 DPI 自动计算像素上限
 - 打包时如果提示 exe 正在运行，请关闭已打开的程序后重试
+- OneDrive/SharePoint PPT 没有本地源目录时，默认输出到桌面；也可手动选择输出目录
 - Mac 下 PPT 自动控制需要授予终端/脚本控制 PowerPoint 的权限
 
 ## 项目结构
@@ -156,6 +166,7 @@ dist/cropper-v0.3.exe
 ├── ui.py            # Tkinter 用户界面
 ├── processor.py     # 批处理与格式输出逻辑
 ├── detector.py      # 白边检测算法
+├── units.py         # point/DPI 尺寸单位换算
 ├── transparency.py  # 背景透明算法
 ├── controllers.py   # PPT/PDF/SVG/图片读取控制器
 ├── build.ps1        # Windows 一键打包脚本
