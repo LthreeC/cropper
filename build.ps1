@@ -9,7 +9,7 @@ $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 
 $AppName = "cropper"
-$AppVersion = "0.4"
+$AppVersion = "0.5"
 $ExeName = "$AppName-v$AppVersion"
 
 function Invoke-Checked {
@@ -49,12 +49,19 @@ function Assert-OutputNotRunning {
     param([string]$Path)
 
     $fullPath = [System.IO.Path]::GetFullPath($Path)
-    $fileName = [System.IO.Path]::GetFileName($fullPath).Replace("'", "''")
-    $running = Get-CimInstance Win32_Process -Filter "Name = '$fileName'" |
-        Where-Object { $_.ExecutablePath -eq $fullPath }
+    $processName = [System.IO.Path]::GetFileNameWithoutExtension($fullPath)
+    $running = Get-Process -Name $processName -ErrorAction SilentlyContinue |
+        Where-Object {
+            try {
+                $_.Path -eq $fullPath
+            }
+            catch {
+                $false
+            }
+        }
 
     if ($running) {
-        $pids = ($running | ForEach-Object { $_.ProcessId }) -join ", "
+        $pids = ($running | ForEach-Object { $_.Id }) -join ", "
         throw "Output exe is running (PID: $pids). Close it, then run build again."
     }
 }
@@ -110,7 +117,9 @@ try {
     Remove-FileWithRetry $outputExe
 
     Write-Host "[INFO] Building $ExeName.exe ..." -ForegroundColor Cyan
-    Invoke-Checked $venvPython @(
+    # Pillow's standard hook already covers supported image plugins.
+    # Exclude large optional components that this application does not use.
+    $pyInstallerArguments = @(
         "-m", "PyInstaller",
         "--noconfirm",
         "--clean",
@@ -120,15 +129,35 @@ try {
         "--noupx",
         "--name", $ExeName,
         "--distpath", "dist",
-        "--workpath", "build\pyinstaller",
+        "--workpath", "build\pyinstaller-compact",
         "--specpath", "build",
-        "--collect-all", "pymupdf",
-        "--collect-submodules", "PIL",
         "--hidden-import", "win32com.client",
         "--hidden-import", "pythoncom",
         "--hidden-import", "pywintypes",
+        "--exclude-module", "PIL.AvifImagePlugin",
+        "--exclude-module", "PIL._avif",
+        "--exclude-module", "PIL.ImageCms",
+        "--exclude-module", "PIL._imagingcms",
+        "--exclude-module", "PIL._imagingft",
+        "--exclude-module", "PIL.ImageMorph",
+        "--exclude-module", "PIL._imagingmorph",
+        "--exclude-module", "win32ui",
+        "--exclude-module", "Pythonwin",
+        "--exclude-module", "numpy.random",
+        "--exclude-module", "numpy.fft",
+        "--exclude-module", "numpy.polynomial",
+        "--exclude-module", "numpy.testing",
+        "--exclude-module", "numpy.f2py",
+        "--exclude-module", "numpy.ma",
+        "--exclude-module", "numpy.typing",
+        "--exclude-module", "numpy.matlib",
+        "--exclude-module", "numpy.ctypeslib",
+        "--exclude-module", "ssl",
+        "--exclude-module", "_ssl",
+        "--exclude-module", "_hashlib",
         "main.py"
     )
+    Invoke-Checked $venvPython $pyInstallerArguments
 
     Write-Host "[DONE] Output: dist\$ExeName.exe" -ForegroundColor Green
 }

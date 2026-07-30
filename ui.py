@@ -1055,7 +1055,7 @@ class CropperApp(ttk.Frame):
             
             # 构建配置
             try:
-                padding = float(self.padding_var.get())
+                padding = max(0.0, float(self.padding_var.get()))
             except:
                 padding = 2.0
             

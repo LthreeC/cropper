@@ -281,8 +281,12 @@ class FileController(BaseController):
         """加载图片"""
         if self.is_svg(path):
             return self.render_document_page(path, 0)
-        from PIL import Image
-        return Image.open(path)
+        from PIL import Image, ImageOps
+
+        with Image.open(path) as image:
+            result = ImageOps.exif_transpose(image)
+            result.load()
+        return result
     
     @classmethod
     def is_image(cls, path):

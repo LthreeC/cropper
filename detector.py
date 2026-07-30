@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-白边检测算法模块 v0.4
+白边检测算法模块 v0.5
 提供三种检测模式：smart(智能), simple(简单), edge(边缘敏感)
 """
 
@@ -18,19 +18,29 @@ class WhiteBorderDetector:
         self.sensitivity = sensitivity
         self.mode = mode
     
-    def detect(self, pil_img):
+    def detect(
+        self,
+        pil_img,
+        max_detection_size=MAX_DETECTION_SIZE,
+        allow_full_content=False,
+    ):
         """检测内容边界框"""
         import numpy as np
         from PIL import Image
         
         # 大图缩放检测
         scale = 1.0
-        max_size = MAX_DETECTION_SIZE
+        max_size = max_detection_size
         
-        if pil_img.width > max_size or pil_img.height > max_size:
+        if max_size is not None and (
+            pil_img.width > max_size or pil_img.height > max_size
+        ):
             scale = max_size / max(pil_img.width, pil_img.height)
             small_img = pil_img.resize(
-                (int(pil_img.width * scale), int(pil_img.height * scale)),
+                (
+                    max(1, int(pil_img.width * scale)),
+                    max(1, int(pil_img.height * scale)),
+                ),
                 Image.NEAREST  # 最快的插值
             )
         else:
@@ -48,7 +58,10 @@ class WhiteBorderDetector:
         else:
             mask = self._detect_smart(img_array)
         
-        bbox = self._get_bbox_from_mask(mask)
+        bbox = self._get_bbox_from_mask(
+            mask,
+            allow_full_content=allow_full_content,
+        )
         
         # 还原坐标
         if bbox and scale != 1.0:
@@ -88,31 +101,31 @@ class WhiteBorderDetector:
         import numpy as np
         
         gray = (img_array.sum(axis=2, dtype=np.uint16) // 3).astype(np.int16)
-        
-        # 梯度检测 (使用切片避免创建新数组)
-        grad_x = np.abs(gray[:, 1:] - gray[:, :-1])
-        grad_y = np.abs(gray[1:, :] - gray[:-1, :])
-        
-        # 填充回原尺寸
-        gx = np.zeros_like(gray)
-        gy = np.zeros_like(gray)
-        gx[:, 1:] = grad_x
-        gy[1:, :] = grad_y
-        
-        gradient = np.maximum(gx, gy)
         edge_threshold = max(3, int(self.sensitivity * 0.3))
-        
-        edge_mask = gradient > edge_threshold
+        edge_mask = self._detect_gradient(gray, edge_threshold)
         content_mask = gray < self.threshold
-        combined = edge_mask | content_mask
-        
-        try:
-            from scipy import ndimage
-            combined = ndimage.binary_dilation(combined, iterations=1)
-        except ImportError:
-            pass
-        
-        return combined
+        return edge_mask | content_mask
+
+    @staticmethod
+    def _detect_gradient(gray, edge_threshold):
+        """把梯度归到较暗的内容侧，避免右侧和底部扩入白底。"""
+        import numpy as np
+
+        edge_mask = np.zeros_like(gray, dtype=bool)
+
+        grad_x = np.abs(gray[:, 1:] - gray[:, :-1])
+        x_edges = grad_x > edge_threshold
+        x_left_is_content = gray[:, :-1] <= gray[:, 1:]
+        edge_mask[:, :-1] |= x_edges & x_left_is_content
+        edge_mask[:, 1:] |= x_edges & ~x_left_is_content
+
+        grad_y = np.abs(gray[1:, :] - gray[:-1, :])
+        y_edges = grad_y > edge_threshold
+        y_top_is_content = gray[:-1, :] <= gray[1:, :]
+        edge_mask[:-1, :] |= y_edges & y_top_is_content
+        edge_mask[1:, :] |= y_edges & ~y_top_is_content
+
+        return edge_mask
     
     def _detect_smart(self, img_array):
         """智能模式：综合检测"""
@@ -136,32 +149,14 @@ class WhiteBorderDetector:
         color_threshold = max(3, int(self.sensitivity * 0.5))
         color_mask = color_var > color_threshold
         
-        # 3. 边缘检测（简化）
-        grad_x = np.abs(gray[:, 1:] - gray[:, :-1])
-        grad_y = np.abs(gray[1:, :] - gray[:-1, :])
-        
-        gx = np.zeros_like(gray)
-        gy = np.zeros_like(gray)
-        gx[:, 1:] = grad_x
-        gy[1:, :] = grad_y
-        
-        gradient = np.maximum(gx, gy)
+        # 3. 边缘检测
         edge_threshold = max(3, int(self.sensitivity * 0.4))
-        edge_mask = gradient > edge_threshold
+        edge_mask = self._detect_gradient(gray, edge_threshold)
         
         # 合并
-        combined = brightness_mask | color_mask | edge_mask
-        
-        # 形态学处理
-        try:
-            from scipy import ndimage
-            combined = ndimage.binary_dilation(combined, iterations=1)
-        except ImportError:
-            pass
-        
-        return combined
+        return brightness_mask | color_mask | edge_mask
     
-    def _get_bbox_from_mask(self, mask):
+    def _get_bbox_from_mask(self, mask, allow_full_content=False):
         """从 mask 获取边界框"""
         import numpy as np
         
@@ -179,13 +174,24 @@ class WhiteBorderDetector:
         
         # 内容占比检查
         content_ratio = mask.sum() / mask.size
-        if content_ratio > 0.95:
+        if content_ratio > 0.95 and not allow_full_content:
             return None
         
         return (x0, y0, x1, y1)
 
 
-def get_bbox(pil_img, threshold=250, sensitivity=15, mode="smart"):
+def get_bbox(
+    pil_img,
+    threshold=250,
+    sensitivity=15,
+    mode="smart",
+    max_detection_size=MAX_DETECTION_SIZE,
+    allow_full_content=False,
+):
     """便捷函数"""
     detector = WhiteBorderDetector(threshold, sensitivity, mode)
-    return detector.detect(pil_img)
+    return detector.detect(
+        pil_img,
+        max_detection_size=max_detection_size,
+        allow_full_content=allow_full_content,
+    )

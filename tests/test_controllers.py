@@ -2,8 +2,11 @@ import sys
 import types
 import unittest
 from unittest.mock import patch
+from pathlib import Path
 
-from controllers import WindowsPPTController
+from PIL import Image
+
+from controllers import FileController, WindowsPPTController
 
 
 class WindowsPPTControllerTests(unittest.TestCase):
@@ -126,6 +129,28 @@ class WindowsPPTControllerTests(unittest.TestCase):
             calls,
             [("output.png", "PNG", 4000, 2250)],
         )
+
+
+class FileControllerTests(unittest.TestCase):
+    def test_load_image_applies_exif_orientation(self):
+        directory = Path(__file__).resolve().parent.parent / "tmp" / "controllers"
+        directory.mkdir(parents=True, exist_ok=True)
+        path = directory / "oriented.jpg"
+        if path.exists():
+            path.unlink()
+        try:
+            image = Image.new("RGB", (80, 40), "white")
+            exif = Image.Exif()
+            exif[274] = 6
+            image.save(path, exif=exif)
+
+            loaded = FileController().load_image(path)
+
+            self.assertEqual(loaded.size, (40, 80))
+            self.assertNotIn(274, loaded.getexif())
+        finally:
+            if path.exists():
+                path.unlink()
 
 
 if __name__ == "__main__":

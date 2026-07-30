@@ -1,4 +1,4 @@
-# 白边裁剪工具 v0.4
+# 白边裁剪工具 v0.5
 
 一款本地运行的批量图片处理工具，主打两件事：
 
@@ -48,10 +48,10 @@ Windows 下如果项目中已有 `venv_clean`，请明确使用该环境启动�
 打包结果：
 
 ```text
-dist/cropper-v0.4.exe
+dist/cropper-v0.5.exe
 ```
 
-如果要覆盖已有 exe，请先关闭正在运行的 `cropper-v0.4.exe`。
+如果要覆盖已有 exe，请先关闭正在运行的 `cropper-v0.5.exe`。
 
 ## 界面说明
 
@@ -88,7 +88,7 @@ dist/cropper-v0.4.exe
 | 边缘敏感 | 更重视浅色边缘，适合内容接近白色的图 |
 | 白色阈值 | 越高越只裁纯白，越低越容易裁掉浅灰 |
 | 敏感度 | 越高越保守，越低裁剪越激进 |
-| 边缘留白 | 裁剪后额外保留的像素边距 |
+| 边缘留白 | 先精确去白边，再额外保留的像素边距；输入 0 表示严格贴合内容 |
 | 输出 DPI | 仅在 PPT/PDF/SVG 渲染为位图时生效，默认 300 DPI |
 | 图片 DPI | PPT 导出 PDF/SVG 时限制内嵌位图的最高 DPI，默认 300；文字和形状仍为矢量 |
 
@@ -136,7 +136,7 @@ dist/cropper-v0.4.exe
 - 收集 PyMuPDF、Pillow、Tkinter、pywin32 等运行所需依赖
 - 输出单文件 exe 到 `dist/`
 
-当前脚本默认不使用 UPX，因此 exe 会比旧版大一些，但兼容性更稳。单文件包内包含 Python 运行时、Tkinter、Pillow、numpy、PyMuPDF 和 Windows COM 依赖，几十 MB 属于正常范围。
+当前脚本默认不使用 UPX，以减少杀毒软件误报和原生扩展兼容问题；构建时会排除未使用的 AVIF、Pillow 字体/CMS/形态学扩展、Pythonwin UI、NumPy 延迟子包和网络 SSL 原生加速。`hashlib` 仍使用标准回退实现，本工具不发起 HTTPS 请求。单文件包仍包含 Python 运行时、Tkinter、Pillow、NumPy 核心、PyMuPDF 和 Windows COM 依赖，当前约 36 MB。
 
 ## 依赖
 
@@ -151,9 +151,11 @@ dist/cropper-v0.4.exe
 ## 注意事项
 
 - JPEG 不支持透明背景，透明处理请输出 PNG 或 WebP
+- 动画 GIF 和多页 TIFF 当前按首帧处理，输出为单页静态文件
 - SVG 输入可用于裁剪和透明处理，但复杂 SVG 的渲染效果取决于 PyMuPDF
 - PPT 导出 PDF/SVG 时保留文字和形状矢量；嵌入位图 DPI 可在界面中选择 300/450/600 或自行输入，默认 300
-- PDF/SVG 矢量去白边只修改页面 CropBox，不会重采样文字、矢量图或源 PDF 位图；DPI 仅影响位图输出
+- PDF/SVG 矢量去白边不会重采样文字、矢量图或源 PDF 位图；PDF 会同步硬裁 MediaBox，避免忽略 CropBox 的软件显示旧白边
+- 矢量输出的“边缘留白”统一按 300 DPI 换算像素，输入 2 表示约保留 2 px，输入 0 表示不主动留白
 - PDF/PPT 页面尺寸使用 point，规范固定为 1 英寸 = 72 point；程序会结合每张图片的显示变换和所选 DPI 自动计算像素上限
 - 打包时如果提示 exe 正在运行，请关闭已打开的程序后重试
 - OneDrive/SharePoint PPT 没有本地源目录时，默认输出到桌面；也可手动选择输出目录

@@ -24,6 +24,14 @@ def _format_workspace():
         "export.webp",
         "vector_source.pdf",
         "vector_output.svg",
+        "blank.pdf",
+        "blank_p1.png",
+        "converted.jpeg",
+        "converted.png",
+        "duplicate.png",
+        "duplicate.jpg",
+        "duplicate_png_cropped.png",
+        "duplicate_jpg_cropped.png",
     ]
     paths = [directory / name for name in names]
     for path in paths:
@@ -54,6 +62,56 @@ class FormatExportTests(unittest.TestCase):
                     processor._save_image(image.copy(), target, fmt, 300)
                     with Image.open(target) as saved:
                         self.assertEqual(saved.size, image.size)
+
+    def test_png_and_jpeg_accept_supported_input_color_modes(self):
+        processor = CropProcessor()
+
+        with _format_workspace() as directory:
+            cmyk = Image.new("CMYK", (40, 30), (20, 80, 120, 10))
+            png_target = directory / "converted.png"
+            processor._save_image(cmyk, png_target, "PNG", 300)
+            with Image.open(png_target) as saved:
+                self.assertEqual(saved.mode, "RGB")
+
+            palette = Image.new("P", (40, 30), 0)
+            palette.putpalette(
+                [255, 255, 255, 20, 80, 120] + [0, 0, 0] * 254
+            )
+            palette.info["transparency"] = 0
+            jpeg_target = directory / "converted.jpeg"
+            processor._save_image(palette, jpeg_target, "JPEG", 300)
+            with Image.open(jpeg_target) as saved:
+                self.assertEqual(saved.mode, "RGB")
+
+    def test_batch_inputs_with_the_same_stem_do_not_overwrite_each_other(self):
+        with _format_workspace() as directory:
+            for suffix in ("png", "jpg"):
+                source = Image.new("RGB", (80, 60), "white")
+                ImageDraw.Draw(source).rectangle(
+                    (20, 15, 60, 45),
+                    fill="black",
+                )
+                source.save(directory / f"duplicate.{suffix}")
+
+            config = {
+                "output_format": "PNG",
+                "output_dir": str(directory),
+                "padding": 0,
+                "threshold": 250,
+                "sensitivity": 15,
+                "detect_mode": "smart",
+                "dpi": 300,
+            }
+            CropProcessor()._process_images(
+                config,
+                [
+                    str(directory / "duplicate.png"),
+                    str(directory / "duplicate.jpg"),
+                ],
+            )
+
+            self.assertTrue((directory / "duplicate_png_cropped.png").exists())
+            self.assertTrue((directory / "duplicate_jpg_cropped.png").exists())
 
     def test_raster_pdf_embeds_pixels_without_resampling(self):
         processor = CropProcessor()
@@ -126,6 +184,42 @@ class FormatExportTests(unittest.TestCase):
                 for level, message in logs
             )
         )
+
+    def test_blank_pdf_page_does_not_report_a_missing_output_as_success(self):
+        with _format_workspace() as directory:
+            source = directory / "blank.pdf"
+            document = pymupdf.open()
+            document.new_page(width=200, height=150)
+            document.save(source)
+            document.close()
+            logs = []
+            processor = CropProcessor(
+                callback=lambda status, log_entry, progress: logs.append(
+                    log_entry
+                ) if log_entry else None
+            )
+
+            result = processor._process_pdf(
+                {
+                    "output_format": "PNG",
+                    "output_dir": str(directory),
+                    "scope": "CURRENT",
+                    "page_num": 1,
+                    "padding": 0,
+                    "threshold": 250,
+                    "sensitivity": 15,
+                    "detect_mode": "smart",
+                    "dpi": 300,
+                },
+                str(source),
+            )
+
+            self.assertIsNone(result)
+            self.assertFalse((directory / "blank_p1.png").exists())
+            self.assertTrue(any(
+                level == "WARNING" and "未检测到可输出内容" in message
+                for level, message in logs
+            ))
 
     def test_pdf_to_svg_remains_vector(self):
         with _format_workspace() as directory:
