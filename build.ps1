@@ -9,7 +9,7 @@ $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 
 $AppName = "cropper"
-$AppVersion = "0.5"
+$AppVersion = "0.5.1"
 $ExeName = "$AppName-v$AppVersion"
 
 function Invoke-Checked {

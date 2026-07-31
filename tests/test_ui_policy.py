@@ -1,6 +1,6 @@
 import unittest
 
-from ui import get_output_quality_policy
+from ui import get_output_quality_policy, parse_processing_numbers
 
 
 class OutputQualityPolicyTests(unittest.TestCase):
@@ -24,7 +24,7 @@ class OutputQualityPolicyTests(unittest.TestCase):
                 )
 
     def test_ppt_raster_outputs_offer_render_dpi(self):
-        for output_format in ("PNG", "TIFF", "JPEG", "WebP"):
+        for output_format in ("PNG", "TIFF", "JPEG", "WebP", "GIF"):
             with self.subTest(output_format=output_format):
                 self.assert_policy(
                     "PPT",
@@ -44,7 +44,7 @@ class OutputQualityPolicyTests(unittest.TestCase):
                 )
 
     def test_document_raster_outputs_offer_render_dpi(self):
-        for output_format in ("PNG", "TIFF", "JPEG", "WebP"):
+        for output_format in ("PNG", "TIFF", "JPEG", "WebP", "GIF"):
             with self.subTest(output_format=output_format):
                 self.assert_policy(
                     "FILE",
@@ -54,7 +54,9 @@ class OutputQualityPolicyTests(unittest.TestCase):
                 )
 
     def test_raster_inputs_never_offer_resampling_dpi(self):
-        for output_format in ("PDF", "SVG", "PNG", "TIFF", "JPEG", "WebP"):
+        for output_format in (
+            "PDF", "SVG", "PNG", "TIFF", "JPEG", "WebP", "GIF",
+        ):
             with self.subTest(output_format=output_format):
                 self.assert_policy(
                     "FILE",
@@ -62,6 +64,25 @@ class OutputQualityPolicyTests(unittest.TestCase):
                     output_format,
                     "none",
                 )
+
+    def test_hidden_numeric_fields_do_not_block_unrelated_outputs(self):
+        values = parse_processing_numbers(
+            "2",
+            "invalid-hidden-dpi",
+            "invalid-hidden-pdf-dpi",
+            "invalid-hidden-page",
+            "none",
+            False,
+        )
+        self.assertEqual(values, (2.0, 300, 300, 1))
+
+    def test_active_numeric_fields_are_still_validated(self):
+        with self.assertRaises(ValueError):
+            parse_processing_numbers("2", "0", "300", "1", "dpi", False)
+        with self.assertRaises(ValueError):
+            parse_processing_numbers(
+                "2", "300", "300", "0", "none", True,
+            )
 
 
 if __name__ == "__main__":

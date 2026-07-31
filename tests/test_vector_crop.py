@@ -40,8 +40,11 @@ def _temporary_pdf_directory():
         *[f"mode_{mode}.pdf" for mode in ("simple", "smart", "edge")],
         "padding_source.pdf",
         "padding_cropped.pdf",
-        "idempotent_first.pdf",
-        "idempotent_second.pdf",
+        *[
+            f"idempotent_{stage}_p{padding}.pdf"
+            for stage in ("first", "second")
+            for padding in (0, 2)
+        ],
         "multipage_source.pdf",
         "multipage_cropped.pdf",
         "interior_vector_source.pdf",
@@ -52,6 +55,11 @@ def _temporary_pdf_directory():
         "raster_edge_p0.pdf",
         "raster_edge_p2.pdf",
         "raster_edge_repeat.pdf",
+        "ocg_source.pdf",
+        "ocg_cropped.pdf",
+        "ocg_revealed.pdf",
+        "page_boxes_source.pdf",
+        "page_boxes_cropped.pdf",
     ]
     paths = [root / name for name in names]
     for path in paths:
@@ -112,6 +120,47 @@ def _create_raster_page_pdf(path):
     document.close()
 
 
+def _create_ocg_pdf(path):
+    document = pymupdf.open()
+    page = document.new_page(width=400, height=300)
+    page.draw_rect(
+        pymupdf.Rect(100, 80, 300, 220),
+        color=(0, 0, 0),
+        fill=(0.8, 0.8, 0.8),
+    )
+    hidden_ocg = document.add_ocg("Hidden edge content", on=0)
+    page.draw_rect(
+        pymupdf.Rect(350, 100, 390, 200),
+        color=(0, 0, 0),
+        fill=(0, 0, 0),
+        oc=hidden_ocg,
+    )
+    document.save(path)
+    document.close()
+
+
+def _create_pdf_with_page_boxes(path):
+    document = pymupdf.open()
+    page = document.new_page(width=400, height=300)
+    page.draw_rect(
+        pymupdf.Rect(100, 80, 300, 220),
+        color=(0, 0, 0),
+        fill=(0.8, 0.8, 0.8),
+    )
+    page.set_bleedbox(pymupdf.Rect(80, 70, 320, 230))
+    page.set_trimbox(pymupdf.Rect(60, 50, 340, 250))
+    page.set_artbox(pymupdf.Rect(120, 90, 280, 210))
+    document.save(path)
+    document.close()
+
+
+def _raw_page_box(document, page, name):
+    kind, value = document.xref_get_key(page.xref, name)
+    if kind != "array":
+        return None
+    return pymupdf.Rect(*(float(item) for item in value[1:-1].split()))
+
+
 def _render_margins(page, dpi=300):
     pixmap = page.get_pixmap(dpi=dpi, alpha=False)
     pixels = np.frombuffer(pixmap.samples, dtype=np.uint8).reshape(
@@ -130,6 +179,118 @@ def _render_margins(page, dpi=300):
 
 
 class VectorCropTests(unittest.TestCase):
+    def test_ocg_pdf_uses_reversible_cropbox_and_keeps_hidden_content(self):
+        with _temporary_pdf_directory() as directory:
+            source = directory / "ocg_source.pdf"
+            target = directory / "ocg_cropped.pdf"
+            revealed_target = directory / "ocg_revealed.pdf"
+            _create_ocg_pdf(source)
+
+            source_document = pymupdf.open(source)
+            try:
+                original_mediabox = tuple(source_document[0].mediabox)
+            finally:
+                source_document.close()
+
+            logs = []
+            processor = CropProcessor(
+                lambda _status, log, _progress: logs.append(log) if log else None
+            )
+            processor._process_vector_crop(
+                str(source),
+                "PDF",
+                str(target),
+                0,
+                250,
+                15,
+                "smart",
+                "ocg",
+            )
+
+            cropped = pymupdf.open(target)
+            try:
+                page = cropped[0]
+                self.assertEqual(tuple(page.mediabox), original_mediabox)
+                self.assertIsNotNone(_raw_page_box(cropped, page, "CropBox"))
+                self.assertLess(page.cropbox.width, page.mediabox.width)
+
+                ocgs = cropped.get_ocgs()
+                self.assertEqual(len(ocgs), 1)
+                page.set_cropbox(page.mediabox)
+                hidden = page.get_pixmap(dpi=72, alpha=False).samples
+                cropped.set_layer(-1, on=list(ocgs), off=[])
+                cropped.save(revealed_target)
+            finally:
+                cropped.close()
+
+            revealed = pymupdf.open(revealed_target)
+            try:
+                visible = revealed[0].get_pixmap(
+                    dpi=72,
+                    alpha=False,
+                ).samples
+                self.assertNotEqual(hidden, visible)
+            finally:
+                revealed.close()
+
+            warning_messages = [
+                message
+                for level, message in logs
+                if level == "WARNING"
+            ]
+            self.assertTrue(any(
+                "可选内容图层" in message and "保留 MediaBox" in message
+                for message in warning_messages
+            ))
+
+    def test_hard_crop_preserves_explicit_prepress_page_boxes(self):
+        with _temporary_pdf_directory() as directory:
+            source = directory / "page_boxes_source.pdf"
+            target = directory / "page_boxes_cropped.pdf"
+            _create_pdf_with_page_boxes(source)
+
+            source_document = pymupdf.open(source)
+            try:
+                source_page = source_document[0]
+                original_boxes = {
+                    name: _raw_page_box(source_document, source_page, name)
+                    for name in ("BleedBox", "TrimBox", "ArtBox")
+                }
+            finally:
+                source_document.close()
+
+            CropProcessor()._process_vector_crop(
+                str(source),
+                "PDF",
+                str(target),
+                0,
+                250,
+                15,
+                "smart",
+                "page_boxes",
+            )
+
+            cropped = pymupdf.open(target)
+            try:
+                page = cropped[0]
+                for name, original in original_boxes.items():
+                    with self.subTest(box=name):
+                        restored = _raw_page_box(cropped, page, name)
+                        self.assertIsNotNone(restored)
+                        expected = original & page.mediabox
+                        self.assertFalse(expected.is_empty)
+                        for actual_value, expected_value in zip(
+                            restored,
+                            expected,
+                        ):
+                            self.assertAlmostEqual(
+                                actual_value,
+                                expected_value,
+                                places=4,
+                            )
+            finally:
+                cropped.close()
+
     def test_crop_preserves_vectors_text_and_image_pixels(self):
         with _temporary_pdf_directory() as directory:
             source = directory / "source.pdf"
@@ -409,8 +570,8 @@ class VectorCropTests(unittest.TestCase):
 
             for padding in (0, 2):
                 with self.subTest(padding=padding):
-                    first = directory / "idempotent_first.pdf"
-                    second = directory / "idempotent_second.pdf"
+                    first = directory / f"idempotent_first_p{padding}.pdf"
+                    second = directory / f"idempotent_second_p{padding}.pdf"
                     CropProcessor()._process_vector_crop(
                         str(source),
                         "PDF",
@@ -501,49 +662,51 @@ class VectorCropTests(unittest.TestCase):
                 cropped.close()
 
     def test_single_page_vector_crop_skips_intermediate_pdf_copy(self):
-        processor = CropProcessor()
-        pdf_path = os.path.abspath("source.pdf")
-        output_dir = os.path.abspath("output")
-        config = {
-            "source_files": [pdf_path],
-            "scope": "CURRENT",
-            "output_format": "PDF",
-            "output_dir": output_dir,
-            "page_num": 2,
-            "padding": 2,
-            "threshold": 250,
-            "sensitivity": 15,
-            "detect_mode": "smart",
-            "dpi": 300,
-        }
+        with _temporary_pdf_directory() as directory:
+            processor = CropProcessor()
+            pdf_path = str(directory / "source.pdf")
+            output_dir = str(directory)
+            document = pymupdf.open()
+            for _ in range(3):
+                document.new_page()
+            document.save(pdf_path)
+            document.close()
+            config = {
+                "source_files": [pdf_path],
+                "scope": "CURRENT",
+                "output_format": "PDF",
+                "output_dir": output_dir,
+                "page_num": 2,
+                "padding": 2,
+                "threshold": 250,
+                "sensitivity": 15,
+                "detect_mode": "smart",
+                "dpi": 300,
+            }
 
-        with (
-            patch(
-                "controllers.FileController.get_pdf_page_count",
-                return_value=3,
-            ),
-            patch.object(
-                processor,
-                "_process_vector_crop",
-                return_value="done",
-            ) as crop,
-            patch.object(processor, "_make_temp_path") as make_temp,
-        ):
-            result = processor._process_pdf(config, pdf_path)
+            with (
+                patch.object(
+                    processor,
+                    "_process_vector_crop",
+                    return_value="done",
+                ) as crop,
+                patch.object(processor, "_make_temp_path") as make_temp,
+            ):
+                result = processor._process_pdf(config, pdf_path)
 
-        self.assertEqual(result, "done")
-        make_temp.assert_not_called()
-        crop.assert_called_once_with(
-            pdf_path,
-            "PDF",
-            os.path.join(output_dir, "source_p2.pdf"),
-            2,
-            250,
-            15,
-            "smart",
-            "source",
-            page_indices=[1],
-        )
+            self.assertEqual(result, "done")
+            make_temp.assert_not_called()
+            crop.assert_called_once_with(
+                pdf_path,
+                "PDF",
+                os.path.join(output_dir, "source_p2.pdf"),
+                2,
+                250,
+                15,
+                "smart",
+                "source",
+                page_indices=[1],
+            )
 
 
 if __name__ == "__main__":

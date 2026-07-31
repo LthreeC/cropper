@@ -7,7 +7,7 @@ import os
 import re
 import tempfile
 import time
-from math import ceil
+from math import ceil, isfinite
 
 from units import pixels_to_points, points_to_pixels
 
@@ -23,6 +23,46 @@ VECTOR_STRICT_INSET_POINTS = 0.075
 RASTER_STRICT_INSET_POINTS = 0.24
 # 含位图的边缘在不同 PDF/SVG 渲染器间最多相差约两个 300 DPI 像素。
 RASTER_PADDING_COMPENSATION_POINTS = 0.48
+MAX_OUTPUT_DPI = 2400
+
+
+def validate_padding(value):
+    """校验像素留白；负数按既有约定归零。"""
+    try:
+        padding = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("边缘留白必须是非负数字") from exc
+    if not isfinite(padding):
+        raise ValueError("边缘留白必须是有限数字")
+    return max(0.0, padding)
+
+
+def validate_dpi(value, label="输出 DPI"):
+    """校验会影响渲染尺寸或内嵌图片质量的 DPI。"""
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{label} 必须是正整数") from exc
+    if not isfinite(numeric) or not numeric.is_integer():
+        raise ValueError(f"{label} 必须是正整数")
+    dpi = int(numeric)
+    if dpi <= 0 or dpi > MAX_OUTPUT_DPI:
+        raise ValueError(f"{label} 必须在 1–{MAX_OUTPUT_DPI} 之间")
+    return dpi
+
+
+def validate_page_number(value):
+    """校验 1 起始页码，具体上限由文档页数决定。"""
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("页码必须是正整数") from exc
+    if not isfinite(numeric) or not numeric.is_integer():
+        raise ValueError("页码必须是正整数")
+    page_num = int(numeric)
+    if page_num <= 0:
+        raise ValueError("页码必须从 1 开始")
+    return page_num
 
 
 class CropProcessor:
@@ -30,8 +70,11 @@ class CropProcessor:
     
     def __init__(self, callback=None):
         self.callback = callback or (lambda *a, **k: None)
+        self.had_errors = False
     
     def log(self, msg, level="INFO"):
+        if level == "ERROR":
+            self.had_errors = True
         self.callback(None, (level, msg), None)
     
     def set_status(self, msg):
@@ -39,6 +82,93 @@ class CropProcessor:
     
     def set_progress(self, val):
         self.callback(None, None, val)
+
+    def _prepare_output_dir(self, path):
+        """创建并验证输出目录在任务开始时可写。"""
+        output_dir = os.path.abspath(os.path.expanduser(path or "."))
+        try:
+            os.makedirs(output_dir, exist_ok=True)
+            if not os.path.isdir(output_dir):
+                raise NotADirectoryError(output_dir)
+            fd, probe = tempfile.mkstemp(prefix=".cropper_write_", dir=output_dir)
+            os.close(fd)
+            os.remove(probe)
+        except OSError as exc:
+            raise ValueError(f"输出目录不可用或不可写: {output_dir}") from exc
+        return output_dir
+
+    @staticmethod
+    def _unique_output_path(path):
+        """已有同名文件或目录时追加 _2、_3，绝不覆盖。"""
+        if not os.path.exists(path):
+            return path
+        root, extension = os.path.splitext(path)
+        serial = 2
+        while True:
+            candidate = f"{root}_{serial}{extension}"
+            if not os.path.exists(candidate):
+                return candidate
+            serial += 1
+
+    @staticmethod
+    def _unique_output_directory(path):
+        """为多页输出目录生成不冲突的名称。"""
+        if not os.path.exists(path):
+            return path
+        serial = 2
+        while True:
+            candidate = f"{path}_{serial}"
+            if not os.path.exists(candidate):
+                return candidate
+            serial += 1
+
+    @staticmethod
+    def _embedded_image_dpi(value, fallback):
+        """容忍缺失或损坏的图片 DPI 元数据。"""
+        if isinstance(value, tuple):
+            value = value[0] if value else fallback
+        try:
+            dpi = float(value)
+        except (TypeError, ValueError):
+            return fallback
+        return dpi if isfinite(dpi) and dpi > 0 else fallback
+
+    @staticmethod
+    def _webp_frame_durations(path):
+        """读取 Pillow 当前不会公开的 WebP ANMF 帧时长（毫秒）。"""
+        durations = []
+        try:
+            with open(path, "rb") as stream:
+                header = stream.read(12)
+                if (
+                    len(header) != 12
+                    or header[:4] != b"RIFF"
+                    or header[8:] != b"WEBP"
+                ):
+                    return durations
+
+                while True:
+                    chunk_header = stream.read(8)
+                    if len(chunk_header) != 8:
+                        break
+                    chunk_type = chunk_header[:4]
+                    chunk_size = int.from_bytes(
+                        chunk_header[4:],
+                        "little",
+                    )
+                    payload_start = stream.tell()
+                    if chunk_type == b"ANMF" and chunk_size >= 16:
+                        frame_header = stream.read(16)
+                        durations.append(int.from_bytes(
+                            frame_header[12:15],
+                            "little",
+                        ))
+                    stream.seek(
+                        payload_start + chunk_size + (chunk_size & 1)
+                    )
+        except (OSError, ValueError):
+            return []
+        return durations
 
     def _cleanup_temp_file(self, path):
         """清理可能仍被 PowerPoint 短暂占用的临时文件"""
@@ -75,6 +205,7 @@ class CropProcessor:
             output_dir = config.get("output_dir") or source_dir or os.path.expanduser("~/Desktop")
             if not config.get("output_dir") and not source_dir and src_path:
                 self.log("PPT 位于云端，输出目录已改为本机桌面", "WARNING")
+            output_dir = self._prepare_output_dir(output_dir)
 
             base_name = self._safe_name(os.path.splitext(ppt_name)[0])
             out_fmt = config["output_format"]
@@ -90,14 +221,14 @@ class CropProcessor:
         """PPT 矢量输出"""
         scope = config["scope"]
         out_fmt = config["output_format"]
-        padding = config["padding"]
+        padding = validate_padding(config["padding"])
         threshold = config["threshold"]
         sensitivity = config["sensitivity"]
         detect_mode = config["detect_mode"]
-        try:
-            pdf_image_dpi = max(1, int(config.get("pdf_image_dpi", 300)))
-        except (TypeError, ValueError):
-            pdf_image_dpi = 300
+        pdf_image_dpi = validate_dpi(
+            config.get("pdf_image_dpi", 300),
+            "PDF 图片 DPI",
+        )
         
         temp_pdf = self._make_temp_path(".pdf")
         temp_pptx = self._make_temp_path(".pptx")
@@ -118,6 +249,17 @@ class CropProcessor:
                     restore_pptx_images_in_document,
                 )
 
+                if scope == "ALL":
+                    with pymupdf.open(temp_pdf) as exported_doc:
+                        exported_page_count = len(exported_doc)
+                    if exported_page_count != total_pages:
+                        self.log(
+                            "PowerPoint PDF 导出仅包含 "
+                            f"{exported_page_count}/{total_pages} 页；"
+                            "隐藏幻灯片不会包含在本次 PDF/SVG 输出中。",
+                            "WARNING",
+                        )
+
                 self.set_status("恢复 PPT 原始图片...")
                 self._cleanup_temp_file(temp_pptx)
                 controller.export_source_copy(temp_pptx)
@@ -126,12 +268,30 @@ class CropProcessor:
                     vector_doc,
                     temp_pptx,
                     max_image_dpi=pdf_image_dpi,
+                    slide_indices=(
+                        None
+                        if scope == "ALL"
+                        else [current_index - 1]
+                    ),
                 )
                 vector_source = vector_doc
                 if restored:
                     self.log(
                         f"已优化 {len(restored)} 个 PDF 位图，"
                         f"最高约 {pdf_image_dpi} DPI"
+                    )
+                stats = getattr(restored, "stats", {})
+                unresolved = (
+                    stats.get("unmatched", 0)
+                    + stats.get("ambiguous", 0)
+                )
+                if unresolved:
+                    self.log(
+                        f"有 {unresolved} 个 PDF 位图无法安全恢复高清源图"
+                        f"（未匹配 {stats.get('unmatched', 0)}，"
+                        f"歧义 {stats.get('ambiguous', 0)}）；"
+                        "已保留 PowerPoint 导出图像，请检查输出画质。",
+                        "WARNING",
                     )
             except Exception as e:
                 if vector_doc is not None:
@@ -175,11 +335,11 @@ class CropProcessor:
         """PPT 光栅输出"""
         scope = config["scope"]
         out_fmt = config["output_format"]
-        padding = config["padding"]
+        padding = validate_padding(config["padding"])
         threshold = config["threshold"]
         sensitivity = config["sensitivity"]
         detect_mode = config["detect_mode"]
-        dpi = config.get("dpi", 300)
+        dpi = validate_dpi(config.get("dpi", 300))
         
         ppt_w, ppt_h = controller.get_page_setup()
         target_width = int(points_to_pixels(ppt_w, dpi))
@@ -187,15 +347,19 @@ class CropProcessor:
         pages = range(1, total_pages + 1) if scope == "ALL" else [current_index]
         
         if scope == "ALL":
-            final_path = os.path.join(output_dir, f"{base_name}_Images")
+            final_path = self._unique_output_directory(
+                os.path.join(output_dir, f"{base_name}_Images")
+            )
             os.makedirs(final_path, exist_ok=True)
         else:
-            final_path = os.path.join(output_dir, f"{base_name}_p{current_index}.{out_fmt.lower()}")
+            final_path = self._unique_output_path(os.path.join(
+                output_dir,
+                f"{base_name}_p{current_index}.{out_fmt.lower()}",
+            ))
         
         saved_paths = []
         for i, idx in enumerate(pages):
             self.set_status(f"处理第 {idx} 页...")
-            self.set_progress((i + 1) / len(pages) * 100)
             
             temp_img = os.path.join(tempfile.gettempdir(), f"temp_{os.getpid()}_{idx}.png")
             
@@ -215,14 +379,21 @@ class CropProcessor:
                         self._save_image(cropped, save_path, out_fmt, dpi)
                         saved_paths.append(save_path)
                         self.log(f"第 {idx} 页完成")
+                        self.set_progress((i + 1) / len(pages) * 95)
                     else:
                         self.log(f"第 {idx} 页: 未检测到内容", "WARNING")
+            except Exception as exc:
+                self.log(f"第 {idx} 页失败: {exc}", "ERROR")
             finally:
                 if os.path.exists(temp_img):
                     os.remove(temp_img)
         
         if saved_paths:
-            self.log(f"完成: {final_path}", "SUCCESS")
+            if not self.had_errors:
+                self.set_progress(100)
+                self.log(f"完成: {final_path}", "SUCCESS")
+            else:
+                self.log(f"部分完成: {final_path}", "WARNING")
             return final_path
         self.log("未检测到可输出内容", "WARNING")
         return None
@@ -244,6 +415,41 @@ class CropProcessor:
             return self._process_pdf(config, pdf_paths[0])
 
         return self._process_images(config, paths)
+
+    @staticmethod
+    def _pdf_interactive_features(doc):
+        """返回 SVG 无法保留的 PDF 交互结构名称。"""
+        features = set()
+        try:
+            if doc.get_toc(simple=True):
+                features.add("书签")
+        except Exception:
+            pass
+        try:
+            if doc.get_ocgs():
+                features.add("可选图层")
+        except Exception:
+            pass
+
+        for page in doc:
+            try:
+                if page.get_links():
+                    features.add("链接")
+            except Exception:
+                pass
+            try:
+                if page.first_annot is not None:
+                    features.add("批注")
+            except Exception:
+                pass
+            try:
+                if page.first_widget is not None:
+                    features.add("表单")
+            except Exception:
+                pass
+            if len(features) == 5:
+                break
+        return sorted(features)
     
     def _process_pdf(self, config, pdf_path):
         """处理 PDF"""
@@ -253,22 +459,67 @@ class CropProcessor:
             self.log("未安装 pymupdf，请运行: pip install pymupdf", "ERROR")
             return None
         
-        from controllers import FileController
-        controller = FileController()
-        total_pages = controller.get_pdf_page_count(pdf_path)
-        
-        self.log(f"加载 PDF: {os.path.basename(pdf_path)} ({total_pages} 页)")
-        
-        output_dir = config.get("output_dir") or os.path.dirname(pdf_path)
-        base_name = self._safe_name(os.path.splitext(os.path.basename(pdf_path))[0])
         out_fmt = config["output_format"]
         scope = config["scope"]
-        page_num = config.get("page_num", 1)
-        padding = config["padding"]
+        if scope not in ("CURRENT", "ALL"):
+            raise ValueError("处理范围必须是当前页或全部页面")
+        page_num = (
+            validate_page_number(config.get("page_num", 1))
+            if scope == "CURRENT"
+            else 1
+        )
+        padding = validate_padding(config["padding"])
         threshold = config["threshold"]
         sensitivity = config["sensitivity"]
         detect_mode = config["detect_mode"]
-        dpi = config.get("dpi", 300)
+        dpi = (
+            validate_dpi(config.get("dpi", 300))
+            if out_fmt not in ("PDF", "SVG")
+            else 300
+        )
+
+        try:
+            document = pymupdf.open(pdf_path)
+        except Exception as exc:
+            self.log(f"无法打开 PDF: {exc}", "ERROR")
+            return None
+        try:
+            if document.needs_pass:
+                self.log(
+                    "PDF 已加密或受密码保护，请先解密后再处理",
+                    "ERROR",
+                )
+                return None
+            total_pages = len(document)
+            if total_pages <= 0:
+                self.log("PDF 不包含可处理页面", "ERROR")
+                return None
+            if scope == "CURRENT" and page_num > total_pages:
+                self.log(
+                    f"页码超出范围：请输入 1–{total_pages}",
+                    "ERROR",
+                )
+                return None
+            if out_fmt == "SVG":
+                features = self._pdf_interactive_features(document)
+                if features:
+                    self.log(
+                        "SVG 仅保留页面的视觉矢量内容；检测到的"
+                        f"{'、'.join(features)}不会保留。如需保留请输出 PDF",
+                        "WARNING",
+                    )
+        finally:
+            document.close()
+
+        from controllers import FileController
+        controller = FileController()
+        self.log(f"加载 PDF: {os.path.basename(pdf_path)} ({total_pages} 页)")
+
+        default_output_dir = os.path.dirname(os.path.abspath(pdf_path))
+        output_dir = self._prepare_output_dir(
+            config.get("output_dir") or default_output_dir
+        )
+        base_name = self._safe_name(os.path.splitext(os.path.basename(pdf_path))[0])
         
         if out_fmt in ["PDF", "SVG"]:
             if scope == "ALL":
@@ -286,15 +537,19 @@ class CropProcessor:
             pages = range(1, total_pages + 1) if scope == "ALL" else [page_num]
             
             if scope == "ALL":
-                final_path = os.path.join(output_dir, f"{base_name}_Images")
+                final_path = self._unique_output_directory(
+                    os.path.join(output_dir, f"{base_name}_Images")
+                )
                 os.makedirs(final_path, exist_ok=True)
             else:
-                final_path = os.path.join(output_dir, f"{base_name}_p{page_num}.{out_fmt.lower()}")
+                final_path = self._unique_output_path(os.path.join(
+                    output_dir,
+                    f"{base_name}_p{page_num}.{out_fmt.lower()}",
+                ))
             
             saved_paths = []
             for i, idx in enumerate(pages):
                 self.set_status(f"处理第 {idx} 页...")
-                self.set_progress((i + 1) / len(pages) * 100)
                 
                 img = controller.render_pdf_page(pdf_path, idx - 1, dpi=dpi)
                 cropped = self._crop_image(img, padding, threshold, sensitivity, detect_mode)
@@ -307,27 +562,202 @@ class CropProcessor:
                     self._save_image(cropped, save_path, out_fmt, dpi)
                     saved_paths.append(save_path)
                     self.log(f"第 {idx} 页完成")
+                    self.set_progress((i + 1) / len(pages) * 95)
                 else:
                     self.log(f"第 {idx} 页: 未检测到内容", "WARNING")
             
             if saved_paths:
+                if not self.had_errors:
+                    self.set_progress(100)
                 self.log(f"完成: {final_path}", "SUCCESS")
                 return final_path
             self.log("未检测到可输出内容", "WARNING")
             return None
+
+    def _process_multiframe_image(
+        self, path, output_dir, output_base, out_fmt, padding,
+        threshold, sensitivity, detect_mode, fallback_dpi,
+    ):
+        """使用联合内容框裁剪动画 / 多页图片并保留帧。"""
+        from PIL import Image, ImageOps
+        from detector import get_bbox
+
+        with Image.open(path) as source:
+            source_format = (source.format or "").upper()
+            requested_format = out_fmt.upper()
+            if source_format == "TIF":
+                source_format = "TIFF"
+            if requested_format == "TIF":
+                requested_format = "TIFF"
+            if requested_format != source_format:
+                self.log(
+                    f"{os.path.basename(path)} 是 {source.n_frames} 帧 "
+                    f"{source_format}；输出 {requested_format} 无法完整保留多帧结构，"
+                    f"请改为输出 {source_format}",
+                    "ERROR",
+                )
+                return None
+
+            frames = []
+            boxes = []
+            durations = []
+            loop = source.info.get("loop", 0)
+            background = source.info.get("background", (0, 0, 0, 0))
+            if not isinstance(background, tuple) or len(background) != 4:
+                background = (0, 0, 0, 0)
+            webp_durations = (
+                self._webp_frame_durations(path)
+                if source_format == "WEBP"
+                else []
+            )
+            source_dpi = self._embedded_image_dpi(
+                source.info.get("dpi"),
+                fallback_dpi,
+            )
+
+            for index in range(source.n_frames):
+                source.seek(index)
+                durations.append(source.info.get("duration", 0))
+                if source_format == "TIFF":
+                    frame = ImageOps.exif_transpose(source.copy())
+                    detection_frame = frame.convert("RGBA")
+                else:
+                    frame = ImageOps.exif_transpose(
+                        source.convert("RGBA")
+                    )
+                    detection_frame = frame
+                frame.load()
+                frames.append(frame)
+                boxes.append(get_bbox(
+                    detection_frame,
+                    threshold,
+                    sensitivity,
+                    detect_mode,
+                ))
+
+        if source_format == "WEBP":
+            if len(webp_durations) == len(frames):
+                durations = webp_durations
+            else:
+                durations = [100] * len(frames)
+                self.log(
+                    f"{os.path.basename(path)}: 无法读取部分 WebP 帧时长，"
+                    "将使用 100 ms 默认值",
+                    "WARNING",
+                )
+
+        content_boxes = [box for box in boxes if box is not None]
+        if not content_boxes:
+            self.log(f"{os.path.basename(path)}: 所有帧均未检测到内容", "WARNING")
+            return None
+
+        same_size = len({frame.size for frame in frames}) == 1
+        if same_size:
+            x0 = min(box[0] for box in content_boxes)
+            y0 = min(box[1] for box in content_boxes)
+            x1 = max(box[2] for box in content_boxes)
+            y1 = max(box[3] for box in content_boxes)
+            width, height = frames[0].size
+            union_box = (
+                max(0, x0 - padding),
+                max(0, y0 - padding),
+                min(width, x1 + padding),
+                min(height, y1 + padding),
+            )
+            cropped_frames = [frame.crop(union_box) for frame in frames]
+        else:
+            self.log(
+                f"{os.path.basename(path)}: 各页尺寸不同，将分别裁剪每页",
+                "WARNING",
+            )
+            cropped_frames = []
+            for frame, box in zip(frames, boxes):
+                if box is None:
+                    cropped_frames.append(frame)
+                    continue
+                cropped_frames.append(frame.crop((
+                    max(0, box[0] - padding),
+                    max(0, box[1] - padding),
+                    min(frame.width, box[2] + padding),
+                    min(frame.height, box[3] + padding),
+                )))
+
+        extension = requested_format.lower()
+        save_path = self._unique_output_path(os.path.join(
+            output_dir,
+            f"{output_base}_cropped.{extension}",
+        ))
+        first, rest = cropped_frames[0], cropped_frames[1:]
+        if requested_format == "GIF":
+            first.save(
+                save_path,
+                "GIF",
+                save_all=True,
+                append_images=rest,
+                duration=durations,
+                loop=loop,
+                # 这些帧已由 Pillow 合成为完整 RGBA 画面。统一清除前帧，
+                # 避免再次应用源 disposal 后改变后续帧的视觉内容。
+                disposal=[2] * len(cropped_frames),
+                optimize=False,
+            )
+        elif requested_format == "TIFF":
+            first.save(
+                save_path,
+                "TIFF",
+                save_all=True,
+                append_images=rest,
+                compression="tiff_lzw",
+                dpi=(source_dpi, source_dpi),
+            )
+        elif requested_format == "WEBP":
+            first.save(
+                save_path,
+                "WEBP",
+                save_all=True,
+                append_images=rest,
+                duration=durations,
+                loop=loop,
+                background=background,
+                lossless=True,
+                quality=95,
+                method=6,
+            )
+        else:
+            self.log(
+                f"暂不支持保留 {source_format} 多帧结构",
+                "ERROR",
+            )
+            return None
+
+        self.log(
+            f"{os.path.basename(path)} 完成，已保留 {len(cropped_frames)} 帧"
+        )
+        return save_path
     
     def _process_images(self, config, paths):
         """处理图片"""
         from controllers import FileController
         
-        output_dir = config.get("output_dir") or os.path.dirname(paths[0])
+        default_output_dir = os.path.dirname(os.path.abspath(paths[0]))
+        output_dir = self._prepare_output_dir(
+            config.get("output_dir") or default_output_dir
+        )
         requested_fmt = config["output_format"]
         
-        padding = config["padding"]
+        padding = validate_padding(config["padding"])
         threshold = config["threshold"]
         sensitivity = config["sensitivity"]
         detect_mode = config["detect_mode"]
-        output_dpi = config.get("dpi", 300)
+        needs_render_dpi = (
+            requested_fmt not in ("PDF", "SVG")
+            and any(FileController.is_svg(path) for path in paths)
+        )
+        output_dpi = (
+            validate_dpi(config.get("dpi", 300))
+            if needs_render_dpi
+            else 300
+        )
         
         results = []
         controller = FileController()
@@ -335,7 +765,6 @@ class CropProcessor:
         
         for i, (path, output_base) in enumerate(zip(paths, output_bases)):
             self.set_status(f"处理 {i+1}/{len(paths)}...")
-            self.set_progress((i + 1) / len(paths) * 100)
             
             try:
                 if FileController.is_svg(path):
@@ -346,33 +775,58 @@ class CropProcessor:
                     )
                     if result:
                         results.append(result)
+                        self.set_progress((i + 1) / len(paths) * 95)
                     continue
 
                 out_fmt = requested_fmt
+                from PIL import Image
+                with Image.open(path) as source:
+                    frame_count = getattr(source, "n_frames", 1)
+                if frame_count > 1:
+                    result = self._process_multiframe_image(
+                        path,
+                        output_dir,
+                        output_base,
+                        out_fmt,
+                        padding,
+                        threshold,
+                        sensitivity,
+                        detect_mode,
+                        output_dpi,
+                    )
+                    if result:
+                        results.append(result)
+                        self.set_progress((i + 1) / len(paths) * 95)
+                    continue
+
                 img = controller.load_image(path)
-                original_dpi = img.info.get('dpi', (300, 300))
-                if isinstance(original_dpi, tuple):
-                    dpi = original_dpi[0]
-                else:
-                    dpi = original_dpi
+                dpi = self._embedded_image_dpi(
+                    img.info.get("dpi"),
+                    output_dpi,
+                )
                 
                 cropped = self._crop_image(img, padding, threshold, sensitivity, detect_mode)
                 
                 if cropped:
-                    save_path = os.path.join(
+                    save_path = self._unique_output_path(os.path.join(
                         output_dir,
                         f"{output_base}_cropped.{out_fmt.lower()}",
-                    )
+                    ))
                     self._save_image(cropped, save_path, out_fmt, dpi)
                     results.append(save_path)
                     self.log(f"{os.path.basename(path)} 完成")
+                    self.set_progress((i + 1) / len(paths) * 95)
                 else:
                     self.log(f"{os.path.basename(path)}: 未检测到内容", "WARNING")
             except Exception as e:
                 self.log(f"{os.path.basename(path)} 失败: {e}", "ERROR")
         
         if results:
-            self.log(f"完成 {len(results)} 个文件", "SUCCESS")
+            if not self.had_errors:
+                self.set_progress(100)
+                self.log(f"完成 {len(results)} 个文件", "SUCCESS")
+            else:
+                self.log(f"部分完成 {len(results)} 个文件", "WARNING")
             return output_dir
         return None
     
@@ -406,7 +860,10 @@ class CropProcessor:
         cropped = self._crop_image(img, padding, threshold, sensitivity, detect_mode)
 
         if cropped:
-            save_path = os.path.join(output_dir, f"{base_name}_cropped.{out_fmt.lower()}")
+            save_path = self._unique_output_path(os.path.join(
+                output_dir,
+                f"{base_name}_cropped.{out_fmt.lower()}",
+            ))
             self._save_image(cropped, save_path, out_fmt, dpi)
             self.log(f"{os.path.basename(path)} 完成")
             return save_path
@@ -424,21 +881,22 @@ class CropProcessor:
             self.log("未选择文件", "ERROR")
             return None
 
-        output_dir = config.get("output_dir") or os.path.dirname(paths[0])
-        os.makedirs(output_dir, exist_ok=True)
+        default_output_dir = os.path.dirname(os.path.abspath(paths[0]))
+        output_dir = self._prepare_output_dir(
+            config.get("output_dir") or default_output_dir
+        )
 
         out_fmt = config.get("output_format", "PNG").upper()
         if out_fmt not in ("PNG", "WEBP"):
             out_fmt = "PNG"
 
         controller = FileController()
-        dpi = config.get("dpi", 300)
+        dpi = validate_dpi(config.get("dpi", 300))
         results = []
         output_bases = self._output_base_names(paths)
 
         for i, (path, output_base) in enumerate(zip(paths, output_bases)):
             self.set_status(f"透明背景 {i+1}/{len(paths)}...")
-            self.set_progress((i + 1) / len(paths) * 100)
 
             try:
                 if FileController.is_pdf(path):
@@ -449,9 +907,21 @@ class CropProcessor:
                     img = controller.render_document_page(path, 0, dpi=dpi)
                     image_dpi = dpi
                 else:
+                    from PIL import Image
+                    with Image.open(path) as source:
+                        frame_count = getattr(source, "n_frames", 1)
+                    if frame_count > 1:
+                        self.log(
+                            f"{os.path.basename(path)}: 透明背景处理暂不支持"
+                            f"保留 {frame_count} 帧，请先拆分帧后处理",
+                            "ERROR",
+                        )
+                        continue
                     img = controller.load_image(path)
-                    original_dpi = img.info.get("dpi", (dpi, dpi))
-                    image_dpi = original_dpi[0] if isinstance(original_dpi, tuple) else original_dpi
+                    image_dpi = self._embedded_image_dpi(
+                        img.info.get("dpi"),
+                        dpi,
+                    )
 
                 transparent, color, ratio = make_transparent(
                     img,
@@ -462,12 +932,13 @@ class CropProcessor:
                     feather=config.get("feather", 1),
                 )
 
-                save_path = os.path.join(
+                save_path = self._unique_output_path(os.path.join(
                     output_dir,
                     f"{output_base}_transparent.{out_fmt.lower()}",
-                )
+                ))
                 self._save_transparent_image(transparent, save_path, out_fmt, image_dpi)
                 results.append(save_path)
+                self.set_progress((i + 1) / len(paths) * 95)
 
                 if ratio > 0:
                     self.log(f"{os.path.basename(path)} 完成，已移除 {ratio:.1%}，颜色 {rgb_to_hex(color)}")
@@ -477,7 +948,14 @@ class CropProcessor:
                 self.log(f"{os.path.basename(path)} 失败: {e}", "ERROR")
 
         if results:
-            self.log(f"透明背景完成 {len(results)} 个文件", "SUCCESS")
+            if not self.had_errors:
+                self.set_progress(100)
+                self.log(f"透明背景完成 {len(results)} 个文件", "SUCCESS")
+            else:
+                self.log(
+                    f"透明背景部分完成 {len(results)} 个文件",
+                    "WARNING",
+                )
             return output_dir
         return None
 
@@ -792,6 +1270,76 @@ class CropProcessor:
             cropbox.x1,
             original_mediabox.y1 - cropbox.y0,
         )
+
+    @staticmethod
+    def _document_has_optional_content(doc):
+        """检测会因 MediaBox 硬裁而永久丢失隐藏内容的 OCG/OCMD。"""
+        try:
+            if doc.get_ocgs():
+                return True
+        except Exception:
+            pass
+
+        try:
+            kind, value = doc.xref_get_key(
+                doc.pdf_catalog(),
+                "OCProperties",
+            )
+            if kind != "null" and value != "null":
+                return True
+        except Exception:
+            pass
+
+        try:
+            for xref in range(1, doc.xref_length()):
+                kind, value = doc.xref_get_key(xref, "Type")
+                if kind == "name" and value in ("/OCG", "/OCMD"):
+                    return True
+        except Exception:
+            pass
+        return False
+
+    @staticmethod
+    def _capture_explicit_page_boxes(doc, page):
+        """保存 set_mediabox() 会删除的显式印前页面框。"""
+        import pymupdf
+
+        boxes = {}
+        number_pattern = (
+            r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[Ee][-+]?\d+)?"
+        )
+        for name in ("BleedBox", "TrimBox", "ArtBox"):
+            kind, value = doc.xref_get_key(page.xref, name)
+            if kind != "array":
+                continue
+            numbers = re.findall(number_pattern, value)
+            if len(numbers) != 4:
+                continue
+            rect = pymupdf.Rect(*(float(item) for item in numbers))
+            if rect.is_valid and not rect.is_empty:
+                boxes[name] = rect
+        return boxes
+
+    @staticmethod
+    def _restore_explicit_page_boxes(doc, page, boxes, mediabox):
+        """在硬裁后按新 MediaBox 取交集恢复合法的印前页面框。"""
+        for name, original in boxes.items():
+            clipped = original & mediabox
+            if clipped.is_empty:
+                continue
+
+            values = []
+            for value in clipped:
+                if abs(value) < 0.0000005:
+                    value = 0.0
+                values.append(
+                    f"{value:.6f}".rstrip("0").rstrip(".") or "0"
+                )
+            doc.xref_set_key(
+                page.xref,
+                name,
+                f"[{' '.join(values)}]",
+            )
     
     def _process_vector_crop(
         self, source_pdf, out_fmt, final_path, padding, threshold,
@@ -813,13 +1361,29 @@ class CropProcessor:
             if page_indices is not None:
                 doc.select(page_indices)
             total = len(doc)
+            preserve_mediabox = (
+                out_fmt == "PDF"
+                and self._document_has_optional_content(doc)
+            )
+            detected_content = preserve_mediabox
+            if preserve_mediabox:
+                self.log(
+                    "检测到 PDF 可选内容图层（OCG/OCMD）；为避免隐藏图层"
+                    "被永久裁除，将保留 MediaBox，仅设置可逆 CropBox。",
+                    "WARNING",
+                )
         
             for i, page in enumerate(doc):
                 self.set_status(f"分析第 {i+1}/{total} 页...")
-                self.set_progress((i + 1) / total * 100)
+                self.set_progress(i / total * 95)
 
                 original_cropbox = pymupdf.Rect(page.cropbox)
                 original_mediabox = pymupdf.Rect(page.mediabox)
+                explicit_page_boxes = (
+                    self._capture_explicit_page_boxes(doc, page)
+                    if out_fmt == "PDF" and not preserve_mediabox
+                    else {}
+                )
                 page_max_size = max(page.rect.width, page.rect.height)
                 coarse_scale = (
                     min(2.0, MAX_DETECTION_SIZE / page_max_size)
@@ -832,8 +1396,22 @@ class CropProcessor:
                     sensitivity,
                     detect_mode,
                 )
+                if coarse is None:
+                    # 区分真正空白页与内容覆盖超过 95% 的已裁紧页面。
+                    full_content = self._detect_page_clip(
+                        page,
+                        coarse_scale,
+                        threshold,
+                        sensitivity,
+                        detect_mode,
+                        allow_full_content=True,
+                    )
+                    if full_content is not None:
+                        detected_content = True
+                    continue
 
                 if coarse:
+                    detected_content = True
                     if not self._has_excess_vector_border(
                         coarse[1],
                         coarse[2],
@@ -893,18 +1471,31 @@ class CropProcessor:
                     if final_cropbox.is_empty:
                         continue
 
-                    if out_fmt == "PDF":
+                    if out_fmt == "PDF" and preserve_mediabox:
+                        page.set_cropbox(final_cropbox)
+                    elif out_fmt == "PDF":
                         hard_mediabox = self._cropbox_to_mediabox(
                             final_cropbox,
                             original_mediabox,
                         )
                         page.set_mediabox(hard_mediabox)
+                        self._restore_explicit_page_boxes(
+                            doc,
+                            page,
+                            explicit_page_boxes,
+                            hard_mediabox,
+                        )
                     else:
                         page.set_cropbox(final_cropbox)
+
+            if not detected_content:
+                self.log("未检测到可输出内容", "WARNING")
+                return None
 
             self.set_status("保存中...")
 
             if out_fmt == "PDF":
+                final_path = self._unique_output_path(final_path)
                 doc.save(
                     final_path,
                     garbage=pdf_garbage,
@@ -914,10 +1505,13 @@ class CropProcessor:
                 result_path = final_path
             elif out_fmt == "SVG":
                 if total == 1:
+                    final_path = self._unique_output_path(final_path)
                     svg_paths = [final_path]
                     result_path = final_path
                 else:
-                    svg_dir = os.path.splitext(final_path)[0]
+                    svg_dir = self._unique_output_directory(
+                        os.path.splitext(final_path)[0]
+                    )
                     os.makedirs(svg_dir, exist_ok=True)
                     svg_paths = [os.path.join(svg_dir, f"{base_name}_p{i+1:03d}.svg") for i in range(total)]
                     result_path = svg_dir
@@ -928,7 +1522,9 @@ class CropProcessor:
                 self.log(f"SVG 已导出: {result_path}", "SUCCESS")
             else:
                 raise ValueError(f"不支持的矢量输出格式: {out_fmt}")
-        
+
+            if not self.had_errors:
+                self.set_progress(100)
             return result_path
         finally:
             if owns_document:

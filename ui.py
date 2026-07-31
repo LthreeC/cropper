@@ -22,6 +22,11 @@ DETECT_MODE_LABELS = {
 def get_output_quality_policy(mode, source_kind, output_format):
     """返回质量控件类型和不会截断的简短说明。"""
     if output_format in ("PDF", "SVG"):
+        if output_format == "SVG":
+            return (
+                "pdf_image_dpi" if mode == "PPT" else "none",
+                "仅导出视觉矢量内容；PDF 链接、批注等交互结构不保留。",
+            )
         if mode == "PPT":
             return (
                 "pdf_image_dpi",
@@ -34,6 +39,28 @@ def get_output_quality_policy(mode, source_kind, output_format):
     if mode == "FILE" and source_kind == "raster":
         return "none", "保留源图片像素尺寸和原始 DPI，不重新采样。"
     return "dpi", "按所选 DPI 渲染位图；像素尺寸会随页面大小自动计算。"
+
+
+def parse_processing_numbers(
+    padding_value,
+    dpi_value,
+    pdf_image_dpi_value,
+    page_value,
+    quality_policy,
+    use_page_number,
+):
+    """只校验当前任务真正生效的数值字段。"""
+    from processor import validate_dpi, validate_padding, validate_page_number
+
+    padding = validate_padding(padding_value)
+    dpi = validate_dpi(dpi_value) if quality_policy == "dpi" else 300
+    pdf_image_dpi = (
+        validate_dpi(pdf_image_dpi_value, "PDF 图片 DPI")
+        if quality_policy == "pdf_image_dpi"
+        else 300
+    )
+    page_num = validate_page_number(page_value) if use_page_number else 1
+    return padding, dpi, pdf_image_dpi, page_num
 
 
 class CropperApp(ttk.Frame):
@@ -206,7 +233,7 @@ class CropperApp(ttk.Frame):
         ).pack(side="left")
         self.file_info = ttk.Label(
             self.file_frame,
-            text="支持 PDF、SVG、PNG、JPG、BMP、TIFF、WebP",
+            text="支持 PDF、SVG、PNG、JPG、BMP、TIFF、WebP、GIF",
             style="Hint.TLabel",
         )
         self.file_info.pack(anchor="w", padx=(62, 0), pady=(5, 0))
@@ -357,7 +384,7 @@ class CropperApp(ttk.Frame):
         self.format_combo = ttk.Combobox(
             controls,
             textvariable=self.output_format_var,
-            values=["PDF", "SVG", "PNG", "TIFF", "JPEG", "WebP"],
+            values=["PDF", "SVG", "PNG", "TIFF", "JPEG", "WebP", "GIF"],
             state="readonly",
             width=9,
             font=self.font_base,
@@ -1054,22 +1081,27 @@ class CropperApp(ttk.Frame):
             processor = CropProcessor(callback=callback)
             
             # 构建配置
-            try:
-                padding = max(0.0, float(self.padding_var.get()))
-            except:
-                padding = 2.0
-            
-            try:
-                dpi = int(self.dpi_var.get())
-            except:
-                dpi = 300
-            
-            try:
-                pdf_image_dpi = int(self.pdf_image_dpi_var.get())
-                if pdf_image_dpi <= 0:
-                    raise ValueError
-            except:
-                pdf_image_dpi = 300
+            mode = self.mode_var.get()
+            source_kind = self._current_source_kind()
+            quality_policy, _ = get_output_quality_policy(
+                mode,
+                source_kind,
+                self.output_format_var.get(),
+            )
+            use_page_number = (
+                mode == "FILE"
+                and self.scope_var.get() == "CURRENT"
+                and len(self.source_files) == 1
+                and os.path.splitext(self.source_files[0])[1].lower() == ".pdf"
+            )
+            padding, dpi, pdf_image_dpi, page_num = parse_processing_numbers(
+                self.padding_var.get(),
+                self.dpi_var.get(),
+                self.pdf_image_dpi_var.get(),
+                self.page_spin.get(),
+                quality_policy,
+                use_page_number,
+            )
 
             config = {
                 "scope": self.scope_var.get(),
@@ -1081,11 +1113,10 @@ class CropperApp(ttk.Frame):
                 "padding": padding,
                 "dpi": dpi,
                 "pdf_image_dpi": pdf_image_dpi,
-                "page_num": self.page_num_var.get(),
+                "page_num": page_num,
                 "source_files": self.source_files,
             }
             
-            mode = self.mode_var.get()
             result = None
             
             if mode == "PPT":
@@ -1096,7 +1127,8 @@ class CropperApp(ttk.Frame):
                 else:
                     result = processor.process_file(config)
             
-            self.after(0, lambda: self.progress_var.set(100))
+            if result and not processor.had_errors:
+                self.after(0, lambda: self.progress_var.set(100))
             
             # 打开输出目录
             if result:
@@ -1147,7 +1179,8 @@ class CropperApp(ttk.Frame):
             else:
                 result = processor.process_transparency(config)
 
-            self.after(0, lambda: self.transparent_progress_var.set(100))
+            if result and not processor.had_errors:
+                self.after(0, lambda: self.transparent_progress_var.set(100))
             if result:
                 self._open_folder(result)
 

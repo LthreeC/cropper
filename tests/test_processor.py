@@ -5,6 +5,27 @@ from processor import CropProcessor
 
 
 class CropProcessorTests(unittest.TestCase):
+    def test_ppt_raster_export_rejects_invalid_dpi(self):
+        config = {
+            "scope": "CURRENT",
+            "output_format": "PNG",
+            "padding": 2,
+            "threshold": 250,
+            "sensitivity": 15,
+            "detect_mode": "smart",
+            "dpi": 0,
+        }
+
+        with self.assertRaisesRegex(ValueError, "输出 DPI"):
+            CropProcessor()._process_ppt_raster(
+                object(),
+                config,
+                1,
+                ".",
+                "deck",
+                1,
+            )
+
     def test_process_ppt_closes_controller_when_connection_fails(self):
         class Controller:
             closed = False
@@ -30,7 +51,12 @@ class CropProcessorTests(unittest.TestCase):
             def export_source_copy(self, path):
                 pass
 
-        processor = CropProcessor()
+        logs = []
+        processor = CropProcessor(
+            callback=lambda status, log_entry, progress: (
+                logs.append(log_entry) if log_entry else None
+            )
+        )
         config = {
             "scope": "CURRENT",
             "output_format": "PDF",
@@ -48,6 +74,16 @@ class CropProcessorTests(unittest.TestCase):
                 self.closed = True
 
         document = Document()
+
+        class RestoreOutcome(list):
+            stats = {
+                "total": 1,
+                "restored": 0,
+                "unmatched": 1,
+                "ambiguous": 0,
+                "sufficient": 0,
+            }
+
         with (
             patch.object(
                 processor,
@@ -63,7 +99,7 @@ class CropProcessorTests(unittest.TestCase):
             patch("pymupdf.open", return_value=document),
             patch(
                 "ppt_image_restore.restore_pptx_images_in_document",
-                return_value=[],
+                return_value=RestoreOutcome(),
             ) as restore,
         ):
             result = processor._process_ppt_vector(
@@ -75,6 +111,7 @@ class CropProcessorTests(unittest.TestCase):
             document,
             "source.pptx",
             max_image_dpi=600,
+            slide_indices=[0],
         )
         crop.assert_called_once_with(
             document,
@@ -88,6 +125,10 @@ class CropProcessorTests(unittest.TestCase):
             pdf_garbage=4,
         )
         self.assertTrue(document.closed)
+        self.assertTrue(any(
+            level == "WARNING" and "无法安全恢复高清源图" in message
+            for level, message in logs
+        ))
 
 
 if __name__ == "__main__":
